@@ -11,7 +11,7 @@
 // ───────────────────────── ตั้งค่า ─────────────────────────
 const SESSION_HOURS    = 12;      // อายุ session
 const MAX_LOGIN_FAILS  = 5;       // ล็อกชั่วคราวหลังกรอกผิดกี่ครั้ง
-const LOCKOUT_MINUTES  = 15;
+const LOCKOUT_SECONDS  = 3;       // ตอนติดตั้งตั้งสั้นไว้ได้ ใช้งานจริงควรกลับไป 60 ขึ้นไป
 const HASH_ROUNDS      = 1000;    // จำนวนรอบ SHA-256 (ชะลอการเดารหัส)
 const ALLOW_SELF_APPROVE = false; // true = อนุญาตให้คนสร้างเอกสารเซ็นอนุมัติเอกสารตัวเองได้
 const DRIVE_ROOT_NAME  = 'TKF-ScrapSales-Files';
@@ -95,8 +95,8 @@ function handleLogin(req) {
   const lockKey = 'lock:' + username;
   const gate = readLoginLock(lockKey);
   if (gate.until > Date.now()) {
-    const left = Math.ceil((gate.until - Date.now()) / 60000);
-    return { ok: false, error: 'กรอกรหัสผิดหลายครั้ง ลองใหม่ใน ' + left + ' นาที' };
+    const left = Math.ceil((gate.until - Date.now()) / 1000);
+    return { ok: false, error: 'กรอกรหัสผิดหลายครั้ง ลองใหม่ใน ' + left + ' วินาที' };
   }
 
   const row = findUser(username);
@@ -129,7 +129,7 @@ function bumpLoginFail(key) {
   try {
     const cur = readLoginLock(key);
     cur.fails = (cur.fails || 0) + 1;
-    if (cur.fails >= MAX_LOGIN_FAILS) { cur.until = Date.now() + LOCKOUT_MINUTES * 60000; cur.fails = 0; }
+    if (cur.fails >= MAX_LOGIN_FAILS) { cur.until = Date.now() + LOCKOUT_SECONDS * 1000; cur.fails = 0; }
     PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(cur));
   } finally { if (held) lock.releaseLock(); }
 }
@@ -741,6 +741,20 @@ function fmtDateTime(d) {
 
 function audit(username, action, recordId, detail) {
   try { sheet(SH.audit).appendRow([new Date(), username, action, recordId, detail]); } catch (e) {}
+}
+
+/**
+ * ปลดล็อกบัญชีที่ถูกล็อกจากการกรอกรหัสผิด — รันจากเมนู Apps Script เมื่อโดนล็อกเอง
+ * (แก้ค่า LOCKOUT_SECONDS อย่างเดียวไม่ช่วย เพราะเวลาปลดถูกบันทึกไว้ตั้งแต่ตอนล็อกแล้ว)
+ */
+function unlock() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  let n = 0;
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf('lock:') === 0) { props.deleteProperty(k); n++; }
+  });
+  return 'ปลดล็อกแล้ว ' + n + ' บัญชี';
 }
 
 /** ล้าง session ที่หมดอายุ — ตั้ง trigger รายวันได้ */
