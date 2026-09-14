@@ -273,10 +273,13 @@ function handleRecordList(session, req) {
 
   const listFieldIds = listFields().filter(function (f) { return f.in_list; }).map(function (f) { return f.field_id; });
   const rows = [];
+  // นับตามตัวกรองปี/เดือน/คำค้นที่ใช้อยู่ (แต่ไม่กรองด้วยสถานะ) ตัวเลขบนแท็บจะได้ตรงกับแถวที่เห็นจริง
+  const counts = {};
+  Object.keys(STATUS).forEach(function (k) { counts[STATUS[k]] = 0; });
+
   for (let i = 1; i < data.length; i++) {
     const o = rowObj(head, data[i], i + 1);
     if (!o.id) continue;
-    if (status && o.status !== status) continue;
     if (o.doc_date) {
       const d = new Date(o.doc_date);
       if (year && d.getFullYear() !== year) continue;
@@ -287,6 +290,8 @@ function handleRecordList(session, req) {
       const hay = (o.supplier + ' ' + o.id + ' ' + JSON.stringify(dj)).toLowerCase();
       if (hay.indexOf(q) < 0) continue;
     }
+    counts[o.status] = (counts[o.status] || 0) + 1;
+    if (status && o.status !== status) continue;
     const brief = {};
     listFieldIds.forEach(function (fid) { brief[fid] = displayValue(dj[fid]); });
     rows.push({
@@ -296,11 +301,6 @@ function handleRecordList(session, req) {
     });
   }
   rows.sort(function (a, b) { return (b.doc_date || '').localeCompare(a.doc_date || ''); });
-
-  const counts = {};
-  Object.keys(STATUS).forEach(function (k) { counts[STATUS[k]] = 0; });
-  for (let i = 1; i < data.length; i++) if (data[i][0]) counts[data[i][5]] = (counts[data[i][5]] || 0) + 1;
-
   return { ok: true, rows: rows, counts: counts };
 }
 

@@ -96,20 +96,35 @@ tbody tr:last-child td{border-bottom:none}
 .ed-bar{background:var(--surface);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
 .ed-body{max-width:900px;margin:0 auto;padding:var(--sp) var(--sp) 90px}
 .section{background:var(--surface);border:1px solid var(--line);border-radius:8px;margin-bottom:14px}
-.section > h3{margin:0;font-size:14px;font-weight:600;padding:12px 16px;border-bottom:1px solid var(--line-soft)}
+.section > h3{margin:0;border-bottom:1px solid var(--line-soft)}
+.sechead{width:100%;display:flex;align-items:center;gap:10px;padding:12px 16px;background:none;border:0;
+  font:inherit;font-size:14px;font-weight:600;cursor:pointer;text-align:left;border-radius:8px 8px 0 0}
+.sechead .count{margin-left:auto;font-weight:400;font-size:13px;color:var(--muted)}
+.sechead .count.full{color:var(--done)}
+.sechead .chev{color:var(--muted);display:inline-block}
+.section.collapsed > h3{border-bottom:0}
+.section.collapsed .section-body{display:none}
+.section.collapsed .chev{transform:rotate(-90deg)}
 .section-body{padding:16px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}
+.grid.photos{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
 .req{color:var(--back)}
 .hint{font-size:12px;color:var(--muted);margin-top:4px}
 
 /* ---------- ช่องรูป ---------- */
-.photo{border:1px dashed var(--line);border-radius:var(--r);aspect-ratio:4/3;display:grid;place-items:center;
-  cursor:pointer;background:#f7f9fa;overflow:hidden;position:relative;text-align:center;color:var(--muted);font-size:13px}
+.photo-wrap{position:relative}
+.photo{width:100%;padding:0;border:1px dashed var(--line);border-radius:var(--r);aspect-ratio:4/3;
+  display:grid;place-items:center;cursor:pointer;background:#f7f9fa;overflow:hidden;
+  text-align:center;color:var(--muted);font-size:13px}
 .photo img{width:100%;height:100%;object-fit:cover}
 .photo.filled{border-style:solid}
-.photo .rm{position:absolute;top:6px;right:6px;background:rgba(20,32,44,.82);color:#fff;border:none;
-  border-radius:4px;width:26px;height:26px;cursor:pointer;line-height:1}
-.photo .busy{position:absolute;inset:0;background:rgba(255,255,255,.86);display:grid;place-items:center;font-size:13px}
+.photo:disabled{cursor:default;opacity:1}
+.ph-act{position:absolute;top:6px;right:6px;display:flex;gap:4px}
+.ph-act button{background:rgba(20,32,44,.82);color:#fff;border:none;border-radius:4px;
+  min-height:26px;padding:0 8px;cursor:pointer;line-height:26px;font-size:13px}
+.ph-act button:hover{background:rgba(20,32,44,.95)}
+.busy{position:absolute;inset:0;background:rgba(255,255,255,.88);display:grid;place-items:center;
+  font-size:13px;border-radius:var(--r);color:var(--ink)}
 
 .footbar{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--line);
   padding:11px var(--sp);display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;z-index:6}
@@ -122,14 +137,32 @@ tbody tr:last-child td{border-bottom:none}
 #lightbox button{position:absolute;top:16px;right:16px}
 
 /* ---------- toast ---------- */
-#toast{position:fixed;left:50%;bottom:80px;transform:translateX(-50%);background:var(--ink);color:#fff;
-  padding:10px 18px;border-radius:20px;z-index:80;font-size:14px;max-width:90vw}
+#toast{position:fixed;left:50%;bottom:var(--toast-bottom,24px);transform:translateX(-50%);background:var(--ink);
+  color:#fff;padding:10px 18px;border-radius:20px;z-index:80;font-size:14px;max-width:90vw;text-align:center}
+
+.age{font-size:12px;color:var(--muted);display:block}
 
 @media (max-width:640px){
   main{padding:12px}
   .who span{display:none}
-  th,td{padding:9px 10px}
   .footbar .btn{flex:1;justify-content:center}
+  .grid.photos{grid-template-columns:1fr 1fr;gap:10px}
+  .photo{aspect-ratio:1}
+  .section-body{padding:12px}
+
+  /* ตารางรายการ → การ์ดต่อแถว (เฉพาะหน้าแรก ไม่แตะตารางในหน้าตั้งค่า) */
+  #list thead{display:none}
+  #list table,#list tbody,#list tr,#list td{display:block;width:100%}
+  #list tr{position:relative;padding:13px 14px;border-bottom:1px solid var(--line-soft)}
+  #list td{border:none;padding:0;white-space:normal}
+  #list .c-id{font-weight:600;padding-right:104px;margin-bottom:2px}
+  #list .c-status{position:absolute;top:13px;right:14px;text-align:right}
+  #list .c-field,#list .c-meta{font-size:14px;color:var(--muted);display:flex;gap:8px}
+  #list .c-field::before{content:attr(data-label);flex:none;min-width:92px;font-size:13px}
+  /* ช่องแรกถัดจากเลขที่ = ข้อมูลหลักของแถว ให้เด่นกว่าช่องอื่น
+     (ใช้ .c-id + .c-field เพราะ :first-of-type จะไปจับ <td> ใบแรกซึ่งเป็นเลขที่) */
+  #list .c-id + .c-field{color:var(--ink);font-size:15px}
+  #list .c-id + .c-field::before{color:var(--muted)}
 }
 @media (prefers-reduced-motion:no-preference){
   #editor{animation:slideup .18s ease-out}
@@ -184,7 +217,7 @@ tbody tr:last-child td{border-bottom:none}
 </div>
 
 <!-- หน้าเอกสาร -->
-<div id="editor" class="hide">
+<div id="editor" class="hide" role="dialog" aria-modal="true" aria-labelledby="edTitle">
   <div class="ed-bar">
     <div class="bar">
       <button class="btn btn-sm" id="edClose">← กลับ</button>

@@ -41,7 +41,13 @@ async function api(action, payload) {
 
 function toast(msg) {
   const old = $('#toast'); if (old) old.remove();
+  // แถบปุ่มล่างสูงไม่เท่ากันเมื่อปุ่มตัดบรรทัดบนมือถือ จึงวัดความสูงจริงแทนการกำหนดค่าตายตัว
+  const foot = $('#edFoot');
+  const lift = (!$('#editor').classList.contains('hide') && foot && foot.offsetHeight)
+    ? foot.offsetHeight + 16 : 24;
+  document.body.style.setProperty('--toast-bottom', lift + 'px');
   const t = el('div', null, msg); t.id = 'toast';
+  t.setAttribute('role', 'status');
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 2800);
 }
@@ -68,6 +74,7 @@ function signOut(reason) {
     try { sessionStorage.setItem('tkf_draft', JSON.stringify(S.rec)); } catch (e) {}
   }
   S.token = null; S.dirty = false; sessionStorage.removeItem('tkf_token');
+  $('#app').inert = false; S.returnFocus = null;
   $('#app').classList.add('hide'); $('#editor').classList.add('hide'); $('#login').classList.remove('hide');
   if (reason) $('#loginMsg').innerHTML = `<div class="msg msg-err">${esc(reason)}</div>`;
 }
@@ -99,7 +106,7 @@ function restoreDraft() {
     S.rec = JSON.parse(raw);
     S.dirty = true;
     renderEditor();
-    $('#editor').classList.remove('hide');
+    showEditor();
     if (S.rec.id) loadThumbs();
     toast('กู้คืนข้อมูลที่กรอกค้างไว้แล้ว — กดบันทึกเพื่อยืนยัน');
   } catch (e) {}
@@ -168,11 +175,24 @@ function renderList() {
   S.rows.forEach(row => {
     const r = el('tr');
     r.tabIndex = 0;
-    r.appendChild(el('td', null, row.id));
-    cols.forEach(c => r.appendChild(el('td', null, row.brief[c.field_id] || '—')));
-    r.appendChild(el('td', null, row.photos ? row.photos + ' รูป' : '—'));
-    const st = el('td'); st.appendChild(statusPill(row.status)); r.appendChild(st);
-    r.appendChild(el('td', null, row.updated_at));
+    r.appendChild(el('td', 'c-id', row.id));
+    cols.forEach(c => {
+      const td = el('td', 'c-field', fmtCell(c, row.brief[c.field_id]));
+      td.dataset.label = c.label;   // ใช้เป็นป้ายกำกับตอนตารางกลายเป็นการ์ดบนมือถือ
+      r.appendChild(td);
+    });
+    const ph = el('td', 'c-meta', row.photos ? row.photos + ' รูป' : '—');
+    ph.dataset.label = 'รูป'; r.appendChild(ph);
+
+    const st = el('td', 'c-status');
+    st.appendChild(statusPill(row.status));
+    const waiting = waitingDays(row);
+    if (waiting) st.appendChild(el('span', 'age', waiting));
+    r.appendChild(st);
+
+    const up = el('td', 'c-meta', row.updated_at); up.dataset.label = 'แก้ไขล่าสุด';
+    r.appendChild(up);
+
     const open = () => openRecord(row.id);
     r.addEventListener('click', open);
     r.addEventListener('keydown', e => { if (e.key === 'Enter') open(); });
@@ -180,6 +200,21 @@ function renderList() {
   });
   t.appendChild(tb);
   host.innerHTML = ''; host.appendChild(t);
+}
+
+function fmtCell(col, v) {
+  if (v == null || v === '') return '—';
+  return col.type === 'date' ? thaiDate(v) : String(v);
+}
+
+/** เอกสารที่รอคนเซ็นอยู่ ควรบอกว่ารอมานานแค่ไหน ไม่ใช่แค่วันที่ดิบ */
+function waitingDays(row) {
+  if ([S.statuses.submitted, S.statuses.reviewed].indexOf(row.status) < 0) return '';
+  const t = Date.parse(String(row.updated_at || '').replace(' ', 'T'));
+  if (isNaN(t)) return '';
+  const d = Math.floor((Date.now() - t) / 86400000);
+  if (d <= 0) return 'รอมาวันนี้';
+  return 'รอมา ' + d + ' วัน';
 }
 
 function statusPill(s) {
@@ -197,7 +232,19 @@ function closeEditor() {
   if (S.dirty && !confirm('มีการแก้ไขที่ยังไม่ได้บันทึก ต้องการออกโดยไม่บันทึกหรือไม่?')) return;
   S.dirty = false; S.rec = null;
   $('#editor').classList.add('hide');
+  $('#app').inert = false;
+  if (S.returnFocus && document.contains(S.returnFocus)) S.returnFocus.focus();
+  S.returnFocus = null;
   refresh();
+}
+
+/** เปิดหน้าเอกสารแบบ dialog: ล็อกโฟกัสไว้ข้างใน ไม่ให้ tab หลุดไปโดนตารางที่อยู่ข้างหลัง */
+function showEditor() {
+  S.returnFocus = document.activeElement;
+  $('#editor').classList.remove('hide');
+  $('#app').inert = true;
+  $('#editor').scrollTop = 0;
+  $('#edClose').focus();
 }
 
 async function openRecord(id) {
@@ -209,8 +256,7 @@ async function openRecord(id) {
   }
   S.dirty = false;
   renderEditor();
-  $('#editor').classList.remove('hide');
-  $('#editor').scrollTop = 0;
+  showEditor();
   if (id) loadThumbs();
 }
 
@@ -245,10 +291,34 @@ function renderEditor() {
     g.items.push(f);
   });
 
-  groups.forEach(g => {
+  groups.forEach((g, gi) => {
     const sec = el('section', 'section');
-    sec.appendChild(el('h3', null, g.name));
-    const sb = el('div', 'section-body grid');
+    const allPhotos = g.items.every(f => f.type === 'image');
+    const filled = g.items.filter(f => S.rec.data[f.field_id]).length;
+
+    // กลุ่มแรกเปิดไว้ ที่เหลือพับ — ฟอร์ม 26 ช่องบนมือถือยาวเกินกว่าจะกางทั้งหมด
+    const collapsed = S.openSections ? !S.openSections[g.name] : gi > 0;
+    if (collapsed) sec.classList.add('collapsed');
+
+    const h3 = el('h3');
+    const head = el('button', 'sechead'); head.type = 'button';
+    head.setAttribute('aria-expanded', String(!collapsed));
+    head.append(
+      el('span', 'chev', '▾'),
+      document.createTextNode(g.name),
+      el('span', 'count' + (filled === g.items.length ? ' full' : ''), filled + '/' + g.items.length)
+    );
+    head.addEventListener('click', () => {
+      sec.classList.toggle('collapsed');
+      const open = !sec.classList.contains('collapsed');
+      head.setAttribute('aria-expanded', String(open));
+      S.openSections = S.openSections || {};
+      S.openSections[g.name] = open;
+      if (open) loadThumbs();
+    });
+    h3.appendChild(head); sec.appendChild(h3);
+
+    const sb = el('div', 'section-body grid' + (allPhotos ? ' photos' : ''));
     g.items.forEach(f => sb.appendChild(renderField(f, ed)));
     sec.appendChild(sb);
     body.appendChild(sec);
@@ -303,34 +373,44 @@ function renderField(f, ed) {
 }
 
 function photoBox(f, ed) {
-  const box = el('div', 'photo');
-  box.id = 'ph_' + f.field_id;
+  const wrap = el('div', 'photo-wrap');
   const v = S.rec.data[f.field_id];
+
+  // เป็น <button> จริง ไม่ใช่ div ที่ดักคลิก → ใช้คีย์บอร์ดแนบรูปได้ และ <label for> ผูกได้ถูกต้อง
+  const box = el('button', 'photo'); box.type = 'button'; box.id = 'ph_' + f.field_id;
   if (v && v.thumb) {
     box.classList.add('filled');
     box.appendChild(el('span', null, 'กำลังโหลดภาพ…'));
+    box.setAttribute('aria-label', 'ดูรูป ' + f.label + ' ขนาดเต็ม');
   } else {
     box.appendChild(el('span', null, ed ? '📷 แตะเพื่อเลือกรูป' : 'ไม่มีรูป'));
+    box.disabled = !ed;
+    box.setAttribute('aria-label', 'แนบรูป ' + f.label);
   }
   box.addEventListener('click', () => {
     const cur = S.rec.data[f.field_id];
     if (cur && cur.full) return showFull(cur.full);
     if (ed) pickPhoto(f);
   });
-  if (v && ed) box.appendChild(removeBtn(f));
-  return box;
-}
+  wrap.appendChild(box);
 
-function removeBtn(f) {
-  const b = el('button', 'rm', '×');
-  b.type = 'button'; b.title = 'ลบรูปนี้';
-  b.addEventListener('click', ev => {
-    ev.stopPropagation();
-    if (!confirm('ลบรูป "' + f.label + '" ?')) return;
-    delete S.rec.data[f.field_id]; S.dirty = true;
-    renderEditor(); loadThumbs();
-  });
-  return b;
+  if (v && ed) {
+    const acts = el('div', 'ph-act');
+    // ถ่ายเบลอแล้วเปลี่ยนใหม่เป็นงานที่เกิดบ่อย ไม่ควรต้องลบก่อนแล้วค่อยแนบใหม่
+    const swap = el('button', null, 'เปลี่ยน'); swap.type = 'button';
+    swap.title = 'เลือกรูปใหม่แทนรูปเดิม';
+    swap.addEventListener('click', () => pickPhoto(f));
+    const rm = el('button', null, '×'); rm.type = 'button';
+    rm.title = 'ลบรูปนี้'; rm.setAttribute('aria-label', 'ลบรูป ' + f.label);
+    rm.addEventListener('click', () => {
+      if (!confirm('ลบรูป "' + f.label + '" ?')) return;
+      delete S.rec.data[f.field_id]; S.dirty = true;
+      renderEditor(); loadThumbs();
+    });
+    acts.append(swap, rm);
+    wrap.appendChild(acts);
+  }
+  return wrap;
 }
 
 /* เลือกรูป → ย่อในเครื่อง 2 ขนาด → อัปโหลด
@@ -340,7 +420,9 @@ function pickPhoto(f) {
   inp.addEventListener('change', async () => {
     const file = inp.files[0]; if (!file) return;
     const box = $('#ph_' + f.field_id);
-    const busy = el('div', 'busy', 'กำลังย่อรูป…'); box.appendChild(busy);
+    const busy = el('div', 'busy', 'กำลังย่อรูป…');
+    busy.setAttribute('role', 'status');
+    box.parentElement.appendChild(busy);
     try {
       if (!S.rec.id) { busy.textContent = 'กำลังสร้างเอกสาร…'; await saveRecord(false, true); }
       const full = await resize(file, CONFIG.FULL);
@@ -390,7 +472,8 @@ async function loadThumbs() {
       const v = S.rec.data[f.field_id]; if (!v || !r.files[v.thumb]) return;
       const box = $('#ph_' + f.field_id); if (!box) return;
       const img = el('img'); img.src = r.files[v.thumb]; img.alt = f.label; img.loading = 'lazy';
-      box.querySelectorAll('span,.busy').forEach(n => n.remove());
+      box.querySelectorAll('span').forEach(n => n.remove());
+      box.parentElement.querySelectorAll('.busy').forEach(n => n.remove());
       box.prepend(img);
     });
   } catch (e) { toast(e.message); }
@@ -415,7 +498,22 @@ async function showFull(id) {
 function renderFooter(ed) {
   const foot = $('#edFoot'); foot.innerHTML = '';
   const rec = S.rec;
-  const add = (label, cls, fn) => { const b = el('button', 'btn ' + cls, label); b.addEventListener('click', fn); foot.appendChild(b); };
+  // Apps Script ตอบ 1–3 วินาที ถ้าไม่ล็อกปุ่มไว้ ผู้ใช้จะกดซ้ำและได้ error สถานะที่อ่านไม่รู้เรื่อง
+  const add = (label, cls, fn) => {
+    const b = el('button', 'btn ' + cls, label);
+    b.addEventListener('click', async () => {
+      const all = foot.querySelectorAll('button');
+      all.forEach(x => { x.disabled = true; });
+      const prev = b.textContent; b.textContent = 'กำลังทำงาน…';
+      try { await fn(); }
+      catch (e) { /* ข้อความแจ้งผู้ใช้ถูกจัดการใน fn แล้ว */ }
+      finally {
+        // footer อาจถูก render ใหม่ระหว่างทาง จึงต้องเช็กว่าปุ่มนี้ยังอยู่ในหน้าจริงไหม
+        if (document.contains(b)) { b.textContent = prev; all.forEach(x => { x.disabled = false; }); }
+      }
+    });
+    foot.appendChild(b);
+  };
 
   if (ed) add('บันทึกร่าง', '', () => saveRecord(false));
   if (ed && S.perm.submit) add('บันทึกและส่งตรวจสอบ', 'btn-primary', () => saveRecord(true));
@@ -474,7 +572,7 @@ function openSettings() {
   if (S.perm.fields) body.appendChild(fieldManager());
   if (S.perm.users) body.appendChild(userManager());
   body.appendChild(passwordBox());
-  $('#editor').classList.remove('hide');
+  showEditor();
 }
 
 function fieldManager() {
@@ -608,6 +706,15 @@ function passwordBox() {
 }
 
 /* ──────────────── utils ──────────────── */
+const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+
+/** 2026-09-14 → 14 ก.ย. 2569 (ให้ตรงกับ dropdown ตัวกรองที่เป็น พ.ศ.) */
+function thaiDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
+  if (!m) return String(s);
+  return Number(m[3]) + ' ' + THAI_MONTHS[Number(m[2]) - 1] + ' ' + (Number(m[1]) + 543);
+}
+
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
