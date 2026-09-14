@@ -63,7 +63,11 @@ $('#loginForm').addEventListener('submit', async (ev) => {
 });
 
 function signOut(reason) {
-  S.token = null; sessionStorage.removeItem('tkf_token');
+  // หลุดกลางคัน (session หมดอายุ) → เก็บสิ่งที่กรอกค้างไว้ก่อน แล้วกู้คืนหลังเข้าระบบใหม่
+  if (reason && S.dirty && S.rec) {
+    try { sessionStorage.setItem('tkf_draft', JSON.stringify(S.rec)); } catch (e) {}
+  }
+  S.token = null; S.dirty = false; sessionStorage.removeItem('tkf_token');
   $('#app').classList.add('hide'); $('#editor').classList.add('hide'); $('#login').classList.remove('hide');
   if (reason) $('#loginMsg').innerHTML = `<div class="msg msg-err">${esc(reason)}</div>`;
 }
@@ -76,6 +80,7 @@ $('#btnLogout').addEventListener('click', async () => {
 async function start() {
   const b = await api('bootstrap');
   S.user = b.user; S.fields = b.fields; S.perm = b.permissions; S.statuses = b.statuses;
+  S.protected = b.protectedFields || [];
   $('#whoName').textContent = b.user.name;
   $('#whoRole').textContent = roleLabel(b.user.role);
   $('#btnNew').hidden = !S.perm.write;
@@ -83,6 +88,21 @@ async function start() {
   $('#login').classList.add('hide'); $('#app').classList.remove('hide');
   buildTabs(); buildDateFilters();
   await refresh();
+  restoreDraft();
+}
+
+function restoreDraft() {
+  const raw = sessionStorage.getItem('tkf_draft');
+  if (!raw) return;
+  sessionStorage.removeItem('tkf_draft');
+  try {
+    S.rec = JSON.parse(raw);
+    S.dirty = true;
+    renderEditor();
+    $('#editor').classList.remove('hide');
+    if (S.rec.id) loadThumbs();
+    toast('กู้คืนข้อมูลที่กรอกค้างไว้แล้ว — กดบันทึกเพื่อยืนยัน');
+  } catch (e) {}
 }
 
 const roleLabel = r => ({ admin: 'ผู้ดูแลระบบ', staff: 'พนักงานบริการสำนักงาน', supervisor: 'ผู้จัดการแผนก', manager: 'ผู้จัดการฝ่าย', viewer: 'ผู้ดูอย่างเดียว' }[r] || r);
@@ -483,10 +503,14 @@ function fieldManager() {
       bHide.addEventListener('click', async () => {
         await api('fields.save', { field: Object.assign({}, f, { visible: !f.visible }) }).then(r => { S.fields = r.fields; draw(); });
       });
+      const locked = (S.protected || []).indexOf(f.field_id) >= 0;
       const bDel = el('button', 'btn btn-sm btn-danger', 'ลบ');
+      bDel.disabled = locked;
+      bDel.title = locked ? 'หัวข้อนี้ระบบใช้ค้นหาและกรองข้อมูล ลบไม่ได้ (ซ่อนได้)' : 'ลบหัวข้อนี้';
       bDel.addEventListener('click', async () => {
         if (!confirm('ลบหัวข้อ "' + f.label + '"?\n\nข้อมูลที่เคยกรอกไว้จะยังอยู่ในชีต และกลับมาแสดงได้ถ้าสร้างหัวข้อรหัสเดิมใหม่')) return;
-        const r = await api('fields.delete', { field_id: f.field_id }); S.fields = r.fields; draw();
+        try { const r = await api('fields.delete', { field_id: f.field_id }); S.fields = r.fields; draw(); }
+        catch (e) { toast(e.message); }
       });
       [bUp, bDn, bEd, bHide, bDel].forEach(b => td.appendChild(b));
       tr.appendChild(td); tb.appendChild(tr);
@@ -516,7 +540,7 @@ function fieldForm(f, done) {
   const options = type === 'select' ? (prompt('ตัวเลือก คั่นด้วย |', (f.options || []).join('|')) || '').split('|').filter(Boolean) : [];
   const required = confirm('บังคับกรอกก่อนส่งตรวจสอบหรือไม่? (ตกลง = บังคับ)');
   const in_list = confirm('แสดงคอลัมน์นี้ในตารางหน้าแรกหรือไม่? (ตกลง = แสดง)');
-  api('fields.save', { field: Object.assign({}, f, { label, type, section, options, required, in_list, visible: true }) })
+  api('fields.save', { field: Object.assign({}, f, { label, type, section, options, required, in_list, visible: f.visible !== false }) })
     .then(r => { S.fields = r.fields; done(); toast('บันทึกหัวข้อแล้ว'); })
     .catch(e => toast(e.message));
 }

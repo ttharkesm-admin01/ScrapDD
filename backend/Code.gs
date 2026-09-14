@@ -16,6 +16,8 @@ const LOCKOUT_MINUTES  = 15;
 const HASH_ROUNDS      = 1000;    // จำนวนรอบ SHA-256 (ชะลอการเดารหัส)
 const ALLOW_SELF_APPROVE = false; // true = อนุญาตให้คนสร้างเอกสารเซ็นอนุมัติเอกสารตัวเองได้
 const DRIVE_ROOT_NAME  = 'TKF-ScrapSales-Files';
+// หัวข้อที่ระบบใช้เป็นคอลัมน์ดัชนี (ค้นหา/กรอง/เรียง) — ลบไม่ได้ ดู keyField()
+const PROTECTED_FIELDS = ['f_date', 'f_supplier'];
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024; // ต่อไฟล์
 
 const SH = {
@@ -125,9 +127,15 @@ function requireSession(token) {
   const data = sheet(SH.sessions).getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
     if (data[i][0] === token) {
-      if (new Date(data[i][3]).getTime() < Date.now()) throw new Error('AUTH: เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
+      const expires = new Date(data[i][3]).getTime();
+      if (expires < Date.now()) throw new Error('AUTH: เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
       const u = findUser(String(data[i][1]));
       if (!u || String(u.active).toLowerCase() !== 'true') throw new Error('AUTH: บัญชีถูกปิดใช้งาน');
+      // ต่ออายุแบบเลื่อน: ใช้งานอยู่จะไม่หลุดกลางคัน เขียนชีตเฉพาะตอนเหลือไม่ถึงครึ่ง
+      const full = SESSION_HOURS * 3600 * 1000;
+      if (expires - Date.now() < full / 2) {
+        sheet(SH.sessions).getRange(i + 1, 4).setValue(new Date(Date.now() + full));
+      }
       return { username: u.username, name: u.display_name, role: u.role };
     }
   }
@@ -174,6 +182,7 @@ function handleBootstrap(session) {
     user: session,
     fields: listFields(),
     statuses: STATUS,
+    protectedFields: PROTECTED_FIELDS,
     permissions: {
       write: can(session, 'write'), submit: can(session, 'submit'),
       review: can(session, 'review'), approve: can(session, 'approve'),
@@ -229,6 +238,8 @@ function handleFieldSave(session, req) {
 /** ลบหัวข้อ = ลบนิยามออกเท่านั้น ค่าที่เคยบันทึกไว้ใน data_json ยังอยู่ครบ (กู้คืนได้ด้วยการสร้าง field_id เดิม) */
 function handleFieldDelete(session, req) {
   need(session, 'fields');
+  if (PROTECTED_FIELDS.indexOf(String(req.field_id)) >= 0)
+    return { ok: false, error: 'หัวข้อนี้ระบบใช้ค้นหาและกรองข้อมูล ลบไม่ได้ (ซ่อนได้)' };
   const sh = sheet(SH.fields);
   const data = sh.getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
@@ -361,6 +372,8 @@ function handleRecordMove(session, req) {
   if (to === STATUS.submitted) {
     need(session, 'submit');
     if ([STATUS.draft, STATUS.rejected].indexOf(r.status) < 0) return { ok: false, error: 'ส่งตรวจได้เฉพาะเอกสารสถานะร่างหรือตีกลับ' };
+    assertEditable(session, r); // ส่งตรวจได้เฉพาะเอกสารที่ตนเองจัดทำ
+
     const missing = listFields().filter(function (f) { return f.visible && f.required && !safeParse(r.data_json)[f.field_id]; })
       .map(function (f) { return f.label; });
     if (missing.length) return { ok: false, error: 'ยังไม่ได้กรอก: ' + missing.join(', ') };
@@ -380,6 +393,8 @@ function handleRecordMove(session, req) {
     if ([STATUS.submitted, STATUS.reviewed].indexOf(r.status) < 0) return { ok: false, error: 'ตีกลับได้เฉพาะเอกสารที่อยู่ระหว่างตรวจสอบ/อนุมัติ' };
     if (!note) return { ok: false, error: 'ต้องระบุเหตุผลที่ตีกลับ' };
     set(STATUS.rejected, null, null);
+    // ล้างลายเซ็นตรวจสอบ/อนุมัติ ไม่ให้ค้างอยู่บนเอกสารที่ยังไม่ผ่าน
+    sh.getRange(r._row, 11, 1, 2).setValues([['', '']]);
   } else if (to === STATUS.draft) {
     need(session, 'reopen'); // admin เท่านั้น
     set(STATUS.draft, null, null);
