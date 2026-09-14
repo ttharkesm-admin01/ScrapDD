@@ -4,7 +4,7 @@
 
 const CONFIG = {
   // 👇 วาง URL ของ Apps Script Web App (ลงท้ายด้วย /exec) ตรงนี้
-  API: 'https://script.google.com/macros/s/XXXXXXXXXXXXXXXXXXXX/exec',
+  API: 'https://script.google.com/macros/s/AKfycby6tukJzC1NMnu1xN0nJTBI9p0GHTFK4vlnQs6ogXZYB5LE-oDTKF-ImvdXoCSMM8FQeg/exec',
   THUMB: 320,   // ความกว้างภาพย่อ (px)
   FULL: 1400,   // ความกว้างภาพเต็ม (px)
   QUALITY: 0.82
