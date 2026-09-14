@@ -9,7 +9,6 @@
  */
 
 // ───────────────────────── ตั้งค่า ─────────────────────────
-const ALLOWED_ORIGIN   = '*';     // จำกัดเป็นโดเมน GitHub Pages ของคุณได้ (ดู README ข้อจำกัด)
 const SESSION_HOURS    = 12;      // อายุ session
 const MAX_LOGIN_FAILS  = 5;       // ล็อกชั่วคราวหลังกรอกผิดกี่ครั้ง
 const LOCKOUT_MINUTES  = 15;
@@ -19,6 +18,17 @@ const DRIVE_ROOT_NAME  = 'TKF-ScrapSales-Files';
 // หัวข้อที่ระบบใช้เป็นคอลัมน์ดัชนี (ค้นหา/กรอง/เรียง) — ลบไม่ได้ ดู keyField()
 const PROTECTED_FIELDS = ['f_date', 'f_supplier'];
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024; // ต่อไฟล์
+const CACHE_TTL_SEC    = 1500;    // อายุแคช session/ผู้ใช้ (วินาที) — กันไม่ให้ต้องไล่อ่านชีตทุกคำขอ
+
+// บทบาทและสิทธิ์ — เป็นรายการเดียวที่ระบบยอมรับ ใช้ทั้งตอนตรวจสิทธิ์และตอนบันทึกผู้ใช้
+const ROLE_RIGHTS = {
+  admin:      ['read', 'write', 'submit', 'review', 'approve', 'delete', 'fields', 'users', 'reopen'],
+  staff:      ['read', 'write', 'submit'],
+  supervisor: ['read', 'review'],
+  manager:    ['read', 'approve'],
+  viewer:     ['read']
+};
+const ROLES = Object.keys(ROLE_RIGHTS);
 
 const SH = {
   users: 'users', sessions: 'sessions', fields: 'fields',
@@ -82,11 +92,10 @@ function handleLogin(req) {
   const password = String(req.password || '');
   if (!username || !password) return { ok: false, error: 'กรอกชื่อผู้ใช้และรหัสผ่าน' };
 
-  const props = PropertiesService.getScriptProperties();
   const lockKey = 'lock:' + username;
-  const lock = JSON.parse(props.getProperty(lockKey) || '{"fails":0,"until":0}');
-  if (lock.until > Date.now()) {
-    const left = Math.ceil((lock.until - Date.now()) / 60000);
+  const gate = readLoginLock(lockKey);
+  if (gate.until > Date.now()) {
+    const left = Math.ceil((gate.until - Date.now()) / 60000);
     return { ok: false, error: 'กรอกรหัสผิดหลายครั้ง ลองใหม่ใน ' + left + ' นาที' };
   }
 
@@ -95,14 +104,12 @@ function handleLogin(req) {
                  hashPassword(password, row.salt) === row.password_hash;
 
   if (!okPass) {
-    lock.fails = (lock.fails || 0) + 1;
-    if (lock.fails >= MAX_LOGIN_FAILS) { lock.until = Date.now() + LOCKOUT_MINUTES * 60000; lock.fails = 0; }
-    props.setProperty(lockKey, JSON.stringify(lock));
+    bumpLoginFail(lockKey);
     audit(username, 'login.fail', '', '');
     return { ok: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' }; // ไม่บอกว่าผิดตรงไหน
   }
 
-  props.deleteProperty(lockKey);
+  PropertiesService.getScriptProperties().deleteProperty(lockKey);
   const token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
   const expires = new Date(Date.now() + SESSION_HOURS * 3600 * 1000);
   sheet(SH.sessions).appendRow([token, username, new Date(), expires]);
@@ -113,33 +120,105 @@ function handleLogin(req) {
   };
 }
 
+/** อ่าน-บวก-เขียนตัวนับรหัสผิด ต้องอยู่ในล็อกเดียวกัน
+ *  ไม่งั้นยิงพร้อมกันหลายคำขอจะอ่านค่าเดิมพร้อมกันแล้วนับได้แค่ครั้งเดียว = เดารหัสได้ไม่จำกัด */
+function bumpLoginFail(key) {
+  const lock = LockService.getScriptLock();
+  let held = false;
+  try { held = lock.tryLock(10000); } catch (e) { held = false; }
+  try {
+    const cur = readLoginLock(key);
+    cur.fails = (cur.fails || 0) + 1;
+    if (cur.fails >= MAX_LOGIN_FAILS) { cur.until = Date.now() + LOCKOUT_MINUTES * 60000; cur.fails = 0; }
+    PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(cur));
+  } finally { if (held) lock.releaseLock(); }
+}
+
+function readLoginLock(key) {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty(key) || '{"fails":0,"until":0}'); }
+  catch (e) { return { fails: 0, until: 0 }; }
+}
+
 function handleLogout(token) {
   const sh = sheet(SH.sessions);
   const data = sh.getDataRange().getValues();
   for (let i = data.length - 1; i >= 1; i--) {
     if (data[i][0] === token) { sh.deleteRow(i + 1); break; }
   }
+  dropSessionCache(token);
   return { ok: true };
 }
 
 function requireSession(token) {
   if (!token) throw new Error('AUTH: กรุณาเข้าสู่ระบบ');
+  const s = lookupSession(token);
+  if (!s) throw new Error('AUTH: เซสชันไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่');
+  if (s.expires < Date.now()) { dropSessionCache(token); throw new Error('AUTH: เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่'); }
+
+  const u = lookupUser(s.username);
+  if (!u || String(u.active).toLowerCase() !== 'true') {
+    dropSessionCache(token);
+    throw new Error('AUTH: บัญชีถูกปิดใช้งาน');
+  }
+
+  // ต่ออายุแบบเลื่อน: ใช้งานอยู่จะไม่หลุดกลางคัน เขียนชีตเฉพาะตอนเหลือไม่ถึงครึ่ง
+  const full = SESSION_HOURS * 3600 * 1000;
+  if (s.expires - Date.now() < full / 2) renewSession(token, s, full);
+
+  return { username: u.username, name: u.display_name, role: u.role };
+}
+
+/* แคช session/ผู้ใช้ไว้ใน CacheService — เดิมทุกคำขอต้องไล่อ่านทั้งชีต sessions และ users
+   ซึ่งเป็นต้นทุนหลักของความหน่วง แคชถูกล้างทันทีตอน logout / ปิดบัญชี / แก้ผู้ใช้
+   จึงไม่มีช่วงที่บัญชีถูกปิดแล้วยังใช้งานต่อได้ */
+function lookupSession(token) {
+  const cache = CacheService.getScriptCache();
+  const key = 'sess:' + token;
+  const hit = cache.get(key);
+  if (hit) { try { return JSON.parse(hit); } catch (e) {} }
   const data = sheet(SH.sessions).getDataRange().getValues();
   for (let i = 1; i < data.length; i++) {
     if (data[i][0] === token) {
-      const expires = new Date(data[i][3]).getTime();
-      if (expires < Date.now()) throw new Error('AUTH: เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
-      const u = findUser(String(data[i][1]));
-      if (!u || String(u.active).toLowerCase() !== 'true') throw new Error('AUTH: บัญชีถูกปิดใช้งาน');
-      // ต่ออายุแบบเลื่อน: ใช้งานอยู่จะไม่หลุดกลางคัน เขียนชีตเฉพาะตอนเหลือไม่ถึงครึ่ง
-      const full = SESSION_HOURS * 3600 * 1000;
-      if (expires - Date.now() < full / 2) {
-        sheet(SH.sessions).getRange(i + 1, 4).setValue(new Date(Date.now() + full));
-      }
-      return { username: u.username, name: u.display_name, role: u.role };
+      const s = { username: String(data[i][1]), expires: new Date(data[i][3]).getTime() };
+      cache.put(key, JSON.stringify(s), CACHE_TTL_SEC);
+      return s;
     }
   }
-  throw new Error('AUTH: เซสชันไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่');
+  return null;
+}
+
+/** หาแถวใหม่ทุกครั้งแทนการจำเลขแถวไว้ — cleanupSessions ลบแถวแล้วเลขแถวที่จำไว้จะเลื่อน */
+function renewSession(token, s, full) {
+  const sh = sheet(SH.sessions);
+  const data = sh.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] !== token) continue;
+    const until = new Date(Date.now() + full);
+    sh.getRange(i + 1, 4).setValue(until);
+    s.expires = until.getTime();
+    CacheService.getScriptCache().put('sess:' + token, JSON.stringify(s), CACHE_TTL_SEC);
+    return;
+  }
+}
+
+function dropSessionCache(token) {
+  try { CacheService.getScriptCache().remove('sess:' + token); } catch (e) {}
+}
+
+function lookupUser(username) {
+  const cache = CacheService.getScriptCache();
+  const key = 'user:' + username;
+  const hit = cache.get(key);
+  if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  const u = findUser(username);
+  if (u) cache.put(key, JSON.stringify({
+    username: u.username, display_name: u.display_name, role: u.role, active: u.active
+  }), CACHE_TTL_SEC);
+  return u;
+}
+
+function dropUserCache(username) {
+  try { CacheService.getScriptCache().remove('user:' + String(username).trim().toLowerCase()); } catch (e) {}
 }
 
 function hashPassword(password, salt) {
@@ -160,15 +239,7 @@ function findUser(username) {
 }
 
 function can(session, what) {
-  const r = session.role;
-  const matrix = {
-    admin:      ['read', 'write', 'submit', 'review', 'approve', 'delete', 'fields', 'users', 'reopen'],
-    staff:      ['read', 'write', 'submit'],
-    supervisor: ['read', 'review'],
-    manager:    ['read', 'approve'],
-    viewer:     ['read']
-  };
-  return (matrix[r] || []).indexOf(what) >= 0;
+  return (ROLE_RIGHTS[session.role] || []).indexOf(what) >= 0;
 }
 
 function need(session, what) {
@@ -216,6 +287,9 @@ function handleFieldSave(session, req) {
   need(session, 'fields');
   const f = req.field || {};
   if (!f.label) return { ok: false, error: 'ต้องระบุชื่อหัวข้อ' };
+  // ซ่อนก็ไม่ได้: ถ้าไม่มีช่องนี้ในฟอร์ม ค่าที่บันทึกจะว่าง คอลัมน์ดัชนีก็ใช้กรองไม่ได้ เท่ากับลบทิ้ง
+  if (PROTECTED_FIELDS.indexOf(String(f.field_id)) >= 0 && f.visible === false)
+    return { ok: false, error: 'หัวข้อนี้ระบบใช้ค้นหาและกรองข้อมูล ซ่อนไม่ได้' };
   const sh = sheet(SH.fields);
   const data = sh.getDataRange().getValues();
   const head = data[0];
@@ -297,6 +371,7 @@ function handleRecordList(session, req) {
     rows.push({
       id: o.id, status: o.status, doc_date: fmtDate(o.doc_date), supplier: o.supplier,
       created_by: o.created_by, updated_at: fmtDateTime(o.updated_at),
+      updated_ms: o.updated_at ? new Date(o.updated_at).getTime() : 0,
       photos: countPhotos(dj), brief: brief
     });
   }
@@ -322,14 +397,6 @@ function handleRecordSave(session, req) {
     const now = new Date();
     const docDate = data[keyField('date')] || '';
     const supplier = data[keyField('supplier')] || '';
-
-    // ตรวจ required เฉพาะฟิลด์ที่ยังเปิดใช้งาน
-    if (req.validate) {
-      const missing = listFields().filter(function (f) {
-        return f.visible && f.required && !data[f.field_id];
-      }).map(function (f) { return f.label; });
-      if (missing.length) return { ok: false, error: 'ยังไม่ได้กรอก: ' + missing.join(', ') };
-    }
 
     if (incoming.id) {
       const r = findRecord(incoming.id);
@@ -492,8 +559,22 @@ function handleFileUpload(session, req) {
   const fsh = sheet(SH.files);
   fsh.appendRow([fFull.getId(), recordId, fieldId, 'full', session.username, new Date()]);
   fsh.appendRow([fThumb.getId(), recordId, fieldId, 'thumb', session.username, new Date()]);
+  // รูปเดิมของช่องนี้ถูกแทนที่แล้ว ย้ายลงถังขยะ Drive ไม่งั้นทุกครั้งที่กด "เปลี่ยน" จะทิ้งไฟล์ค้างไว้ตลอด
+  purgeFieldFiles(recordId, fieldId, [fFull.getId(), fThumb.getId()]);
   audit(session.username, 'file.upload', recordId, fieldId);
   return { ok: true, full: fFull.getId(), thumb: fThumb.getId() };
+}
+
+/** ลบไฟล์ของช่องนี้ทั้งหมด ยกเว้นรหัสที่สั่งให้เก็บไว้ */
+function purgeFieldFiles(recordId, fieldId, keepIds) {
+  const fsh = sheet(SH.files);
+  const fd = fsh.getDataRange().getValues();
+  for (let i = fd.length - 1; i >= 1; i--) {
+    if (String(fd[i][1]) !== String(recordId) || String(fd[i][2]) !== String(fieldId)) continue;
+    if ((keepIds || []).indexOf(String(fd[i][0])) >= 0) continue;
+    try { DriveApp.getFileById(fd[i][0]).setTrashed(true); } catch (e) {}
+    fsh.deleteRow(i + 1);
+  }
 }
 
 function handleFileBatch(session, req) {
@@ -555,19 +636,46 @@ function handleUserSave(session, req) {
   const u = req.user || {};
   const username = String(u.username || '').trim().toLowerCase();
   if (!username) return { ok: false, error: 'ต้องระบุชื่อผู้ใช้' };
+  // บทบาทนอกตารางสิทธิ์ = บัญชีที่เข้าระบบได้แต่ทำอะไรไม่ได้เลย และดูปกติในหน้าจัดการผู้ใช้
+  if (u.role !== undefined && ROLES.indexOf(String(u.role)) < 0)
+    return { ok: false, error: 'บทบาทไม่ถูกต้อง ใช้ได้เฉพาะ: ' + ROLES.join(', ') };
+
   const sh = sheet(SH.users);
   const existing = findUser(username);
   if (existing) {
+    // อัปเดตเฉพาะช่องที่ส่งมาจริง — ส่ง role มาอย่างเดียวต้องไม่ไปเปิดบัญชีที่ปิดไว้
+    const role = u.role !== undefined ? String(u.role) : String(existing.role);
+    const active = u.active !== undefined ? u.active !== false
+                                          : String(existing.active).toLowerCase() === 'true';
+    const blocked = lastAdminGuard(username, existing, role, active);
+    if (blocked) return { ok: false, error: blocked };
     sh.getRange(existing._row, 2).setValue(u.display_name || existing.display_name);
-    sh.getRange(existing._row, 3).setValue(u.role || existing.role);
-    sh.getRange(existing._row, 6).setValue(u.active !== false);
+    sh.getRange(existing._row, 3).setValue(role);
+    sh.getRange(existing._row, 6).setValue(active);
   } else {
     if (!u.password || String(u.password).length < 8) return { ok: false, error: 'รหัสผ่านต้องยาวอย่างน้อย 8 ตัวอักษร' };
     const salt = Utilities.getUuid();
     sh.appendRow([username, u.display_name || username, u.role || 'viewer', salt, hashPassword(u.password, salt), u.active !== false]);
   }
+  dropUserCache(username);
   audit(session.username, 'user.save', '', username);
   return handleUserList(session);
+}
+
+/** ถ้าปล่อยให้ admin ที่ใช้งานได้เหลือศูนย์คน จะไม่มีใครแก้ผู้ใช้ได้อีกเลย
+ *  ต้องไปแก้ในชีตด้วยมือเท่านั้น — กันไว้ตั้งแต่ต้น */
+function lastAdminGuard(username, existing, role, active) {
+  const wasActiveAdmin = String(existing.role) === 'admin' &&
+                         String(existing.active).toLowerCase() === 'true';
+  if (!wasActiveAdmin) return '';
+  if (role === 'admin' && active) return '';
+  const data = sheet(SH.users).getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (!data[i][0]) continue;
+    if (String(data[i][0]).trim().toLowerCase() === username) continue;
+    if (String(data[i][2]) === 'admin' && String(data[i][5]).toLowerCase() === 'true') return '';
+  }
+  return 'ต้องเหลือผู้ดูแลระบบที่ใช้งานได้อย่างน้อย 1 บัญชี — เพิ่มผู้ดูแลคนใหม่ก่อนจึงจะเปลี่ยนบัญชีนี้ได้';
 }
 
 function handleUserPassword(session, req) {
@@ -633,7 +741,10 @@ function cleanupSessions() {
   const sh = sheet(SH.sessions);
   const data = sh.getDataRange().getValues();
   for (let i = data.length - 1; i >= 1; i--) {
-    if (new Date(data[i][3]).getTime() < Date.now()) sh.deleteRow(i + 1);
+    if (new Date(data[i][3]).getTime() < Date.now()) {
+      dropSessionCache(String(data[i][0]));
+      sh.deleteRow(i + 1);
+    }
   }
 }
 

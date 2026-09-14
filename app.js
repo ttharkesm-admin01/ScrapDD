@@ -210,9 +210,8 @@ function fmtCell(col, v) {
 /** เอกสารที่รอคนเซ็นอยู่ ควรบอกว่ารอมานานแค่ไหน ไม่ใช่แค่วันที่ดิบ */
 function waitingDays(row) {
   if ([S.statuses.submitted, S.statuses.reviewed].indexOf(row.status) < 0) return '';
-  const t = Date.parse(String(row.updated_at || '').replace(' ', 'T'));
-  if (isNaN(t)) return '';
-  const d = Math.floor((Date.now() - t) / 86400000);
+  if (!row.updated_ms) return '';   // ใช้เวลาแบบ epoch ข้อความ 'yyyy-MM-dd HH:mm' จะถูกอ่านเป็นเวลาเครื่องผู้ใช้
+  const d = Math.floor((Date.now() - row.updated_ms) / 86400000);
   if (d <= 0) return 'รอมาวันนี้';
   return 'รอมา ' + d + ' วัน';
 }
@@ -254,6 +253,7 @@ async function openRecord(id) {
   } else {
     S.rec = { id: null, status: S.statuses.draft, data: {}, sign: {}, created_by: S.user.username };
   }
+  S.openSections = null;   // เอกสารใหม่เริ่มที่ค่าเริ่มต้นเสมอ ไม่เอาสถานะพับ/กางของเอกสารก่อนหน้ามา
   S.dirty = false;
   renderEditor();
   showEditor();
@@ -297,7 +297,9 @@ function renderEditor() {
     const filled = g.items.filter(f => S.rec.data[f.field_id]).length;
 
     // กลุ่มแรกเปิดไว้ ที่เหลือพับ — ฟอร์ม 26 ช่องบนมือถือยาวเกินกว่าจะกางทั้งหมด
-    const collapsed = S.openSections ? !S.openSections[g.name] : gi > 0;
+    const collapsed = (S.openSections && g.name in S.openSections)
+      ? !S.openSections[g.name]
+      : gi > 0;
     if (collapsed) sec.classList.add('collapsed');
 
     const h3 = el('h3');
@@ -597,14 +599,20 @@ function fieldManager() {
       bDn.addEventListener('click', () => reorder(i, i + 1));
       const bEd = el('button', 'btn btn-sm', 'แก้ไข');
       bEd.addEventListener('click', () => fieldForm(f, draw));
-      const bHide = el('button', 'btn btn-sm', f.visible ? 'ซ่อน' : 'แสดง');
-      bHide.addEventListener('click', async () => {
-        await api('fields.save', { field: Object.assign({}, f, { visible: !f.visible }) }).then(r => { S.fields = r.fields; draw(); });
-      });
       const locked = (S.protected || []).indexOf(f.field_id) >= 0;
+      const lockWhy = 'หัวข้อนี้ระบบใช้ค้นหาและกรองข้อมูล ลบหรือซ่อนไม่ได้';
+      const bHide = el('button', 'btn btn-sm', f.visible ? 'ซ่อน' : 'แสดง');
+      bHide.disabled = locked && f.visible;
+      if (bHide.disabled) bHide.title = lockWhy;
+      bHide.addEventListener('click', async () => {
+        try {
+          const r = await api('fields.save', { field: Object.assign({}, f, { visible: !f.visible }) });
+          S.fields = r.fields; draw();
+        } catch (e) { toast(e.message); }
+      });
       const bDel = el('button', 'btn btn-sm btn-danger', 'ลบ');
       bDel.disabled = locked;
-      bDel.title = locked ? 'หัวข้อนี้ระบบใช้ค้นหาและกรองข้อมูล ลบไม่ได้ (ซ่อนได้)' : 'ลบหัวข้อนี้';
+      bDel.title = locked ? lockWhy : 'ลบหัวข้อนี้';
       bDel.addEventListener('click', async () => {
         if (!confirm('ลบหัวข้อ "' + f.label + '"?\n\nข้อมูลที่เคยกรอกไว้จะยังอยู่ในชีต และกลับมาแสดงได้ถ้าสร้างหัวข้อรหัสเดิมใหม่')) return;
         try { const r = await api('fields.delete', { field_id: f.field_id }); S.fields = r.fields; draw(); }
@@ -650,6 +658,15 @@ function userManager() {
   const list = el('div'); sb.appendChild(list);
   const roles = ['admin', 'staff', 'supervisor', 'manager', 'viewer'];
 
+  /** บทบาทที่พิมพ์ผิดจะสร้างบัญชีที่เข้าระบบได้แต่ไม่มีสิทธิ์อะไรเลย จึงต้องตรงกับรายการเท่านั้น */
+  const askRole = (current) => {
+    const v = prompt('บทบาท: ' + roles.join(' / '), current);
+    if (v === null) return '';
+    const r = String(v).trim().toLowerCase();
+    if (roles.indexOf(r) < 0) { toast('บทบาทไม่ถูกต้อง — ใช้ได้เฉพาะ: ' + roles.join(', ')); return ''; }
+    return r;
+  };
+
   const draw = async () => {
     const r = await api('users.list');
     const t = el('table');
@@ -661,11 +678,15 @@ function userManager() {
       const td = el('td');
       const bR = el('button', 'btn btn-sm', 'เปลี่ยนบทบาท');
       bR.addEventListener('click', async () => {
-        const role = prompt('บทบาท: ' + roles.join(' / '), u.role); if (!role) return;
-        await api('users.save', { user: { username: u.username, role } }); draw();
+        const role = askRole(u.role); if (!role) return;
+        try { await api('users.save', { user: { username: u.username, role } }); draw(); }
+        catch (e) { toast(e.message); }
       });
       const bA = el('button', 'btn btn-sm', u.active ? 'ปิดใช้งาน' : 'เปิดใช้งาน');
-      bA.addEventListener('click', async () => { await api('users.save', { user: { username: u.username, active: !u.active } }); draw(); });
+      bA.addEventListener('click', async () => {
+        try { await api('users.save', { user: { username: u.username, active: !u.active } }); draw(); }
+        catch (e) { toast(e.message); }
+      });
       const bP = el('button', 'btn btn-sm', 'ตั้งรหัสใหม่');
       bP.addEventListener('click', async () => {
         const pw = prompt('รหัสผ่านใหม่ (อย่างน้อย 8 ตัว)'); if (!pw) return;
@@ -681,7 +702,7 @@ function userManager() {
     add.addEventListener('click', async () => {
       const username = prompt('ชื่อผู้ใช้ (ภาษาอังกฤษ)'); if (!username) return;
       const display_name = prompt('ชื่อที่แสดง', username) || username;
-      const role = prompt('บทบาท: ' + roles.join(' / '), 'staff') || 'staff';
+      const role = askRole('staff'); if (!role) return;
       const password = prompt('รหัสผ่านเริ่มต้น (อย่างน้อย 8 ตัว)'); if (!password) return;
       try { await api('users.save', { user: { username, display_name, role, password } }); draw(); toast('เพิ่มผู้ใช้แล้ว'); }
       catch (e) { toast(e.message); }
