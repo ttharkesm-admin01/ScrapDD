@@ -14,6 +14,9 @@ const MAX_LOGIN_FAILS  = 5;       // ล็อกชั่วคราวหล�
 const LOCKOUT_SECONDS  = 3;       // ตอนติดตั้งตั้งสั้นไว้ได้ ใช้งานจริงควรกลับไป 60 ขึ้นไป
 const HASH_ROUNDS      = 1000;    // จำนวนรอบ SHA-256 (ชะลอการเดารหัส)
 const ALLOW_SELF_APPROVE = false; // true = อนุญาตให้คนสร้างเอกสารเซ็นอนุมัติเอกสารตัวเองได้
+// false = ส่งตรวจได้แม้กรอกไม่ครบ/รูปไม่ครบ (เครื่องหมาย * ในฟอร์มยังบอกว่าช่องไหนควรกรอก)
+// true  = ต้องกรอกช่องที่ทำเครื่องหมายบังคับให้ครบก่อนจึงจะกดส่งตรวจได้
+const REQUIRE_COMPLETE_ON_SUBMIT = false;
 const DRIVE_ROOT_NAME  = 'TKF-ScrapSales-Files';
 // หัวข้อที่ระบบใช้เป็นคอลัมน์ดัชนี (ค้นหา/กรอง/เรียง) — ลบไม่ได้ ดู keyField()
 const PROTECTED_FIELDS = ['f_date', 'f_supplier'];
@@ -441,9 +444,11 @@ function handleRecordMove(session, req) {
     if ([STATUS.draft, STATUS.rejected].indexOf(r.status) < 0) return { ok: false, error: 'ส่งตรวจได้เฉพาะเอกสารสถานะร่างหรือตีกลับ' };
     assertEditable(session, r); // ส่งตรวจได้เฉพาะเอกสารที่ตนเองจัดทำ
 
-    const missing = listFields().filter(function (f) { return f.visible && f.required && !safeParse(r.data_json)[f.field_id]; })
-      .map(function (f) { return f.label; });
-    if (missing.length) return { ok: false, error: 'ยังไม่ได้กรอก: ' + missing.join(', ') };
+    if (REQUIRE_COMPLETE_ON_SUBMIT) {
+      const missing = listFields().filter(function (f) { return f.visible && f.required && !safeParse(r.data_json)[f.field_id]; })
+        .map(function (f) { return f.label; });
+      if (missing.length) return { ok: false, error: 'ยังไม่ได้กรอก: ' + missing.join(', ') };
+    }
     set(STATUS.submitted, 10, stamp);
   } else if (to === STATUS.reviewed) {
     need(session, 'review');
