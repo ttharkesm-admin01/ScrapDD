@@ -546,6 +546,11 @@ function handleFileUpload(session, req) {
   if (!r) return { ok: false, error: 'ไม่พบเอกสาร' };
   assertEditable(session, r);
 
+  // เก็บกวาดไฟล์รุ่นก่อนของช่องนี้ ทำ "ก่อน" อัปโหลด และเก็บไฟล์ที่ data_json ชี้อยู่ไว้เสมอ
+  // ถ้าลบไฟล์ที่เอกสารยังอ้างถึงแล้วการบันทึกรอบถัดไปพลาด (เน็ตหลุดกลางลาน) รูปจะหายจากเอกสารทันที
+  // จึงยอมให้ไฟล์ค้างได้ 1 รุ่นต่อช่อง แล้วเก็บกวาดตอนอัปโหลดครั้งถัดไป
+  purgeFieldFiles(recordId, fieldId, linkedIds(safeParse(r.data_json)[fieldId]));
+
   const mime = req.mime || 'image/jpeg';
   const full = Utilities.base64Decode(req.full);
   const thumb = Utilities.base64Decode(req.thumb);
@@ -559,10 +564,12 @@ function handleFileUpload(session, req) {
   const fsh = sheet(SH.files);
   fsh.appendRow([fFull.getId(), recordId, fieldId, 'full', session.username, new Date()]);
   fsh.appendRow([fThumb.getId(), recordId, fieldId, 'thumb', session.username, new Date()]);
-  // รูปเดิมของช่องนี้ถูกแทนที่แล้ว ย้ายลงถังขยะ Drive ไม่งั้นทุกครั้งที่กด "เปลี่ยน" จะทิ้งไฟล์ค้างไว้ตลอด
-  purgeFieldFiles(recordId, fieldId, [fFull.getId(), fThumb.getId()]);
   audit(session.username, 'file.upload', recordId, fieldId);
   return { ok: true, full: fFull.getId(), thumb: fThumb.getId() };
+}
+
+function linkedIds(v) {
+  return (v && typeof v === 'object') ? [String(v.full || ''), String(v.thumb || '')] : [];
 }
 
 /** ลบไฟล์ของช่องนี้ทั้งหมด ยกเว้นรหัสที่สั่งให้เก็บไว้ */
