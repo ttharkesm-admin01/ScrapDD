@@ -527,13 +527,16 @@ function recordOut(r) {
   };
 }
 
+/** เลขที่เอกสาร: ปีเดือนวัน-เลขรัน เช่น 20260914-001 เลขรันเริ่มนับ 1 ใหม่ทุกวัน
+ *  ใช้วันตามเวลาไทย เลขจะได้เปลี่ยนตอนเที่ยงคืนบ้านเรา ไม่ใช่เที่ยงคืน UTC
+ *  อ่าน-บวก-เขียนอยู่ใน LockService ของ handleRecordSave แล้ว จึงไม่ชนกันเอง */
 function nextId() {
   const props = PropertiesService.getScriptProperties();
-  const y = new Date().getFullYear();
-  const key = 'seq:' + y;
+  const day = Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyyyMMdd');
+  const key = 'seq:' + day;
   const n = Number(props.getProperty(key) || 0) + 1;
   props.setProperty(key, String(n));
-  return 'SC' + y + '-' + ('000' + n).slice(-4);
+  return day + '-' + String(n).padStart(3, '0');   // เกิน 999 ใบ/วัน จะยาวขึ้นเอง ไม่ซ้ำกัน
 }
 
 function keyField(kind) {
