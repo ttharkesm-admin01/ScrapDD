@@ -9,6 +9,15 @@ const CONFIG = {
   QUALITY: 0.82
 };
 
+/* หัวกระดาษและผู้ลงนามของแบบฟอร์มที่พิมพ์ออกมา — แก้ข้อความได้ที่นี่ที่เดียว */
+const PRINT = {
+  title: 'รูปภาพแสดงขั้นตอนการขายผลพลอยได้',
+  subtitle: 'โรงงานผลิตอาหารสัตว์บกธารเกษม',
+  signers: ['ผู้ขับรถ', 'หน่วยงานธุรการ'],
+  skipSections: [],   // ใส่ชื่อกลุ่มที่ไม่อยากให้ขึ้นในใบพิมพ์ เช่น ['เอกสารแนบ']
+  unitField: 'f_qty', unitText: 'กิโลกรัม'
+};
+
 const S = {
   token: null, user: null, fields: [], perm: {}, statuses: {}, protected: [],
   view: 'list', status: '', rows: [], rec: null, step: 0, dirty: false,
@@ -801,6 +810,7 @@ function renderFooter(secs, reviewStep) {
   if (row.children.length) foot.appendChild(row);
 
   const row2 = el('div', 'row');
+  if (rec.id) row2.appendChild(mkBtn('🖨 พิมพ์', 'btn', openPrint));
   if (S.user.role === 'admin' && rec.id && rec.status !== S.statuses.draft)
     row2.appendChild(mkBtn('ดึงกลับเป็นร่าง', 'btn', () => move(S.statuses.draft)));
   if (S.perm.del && rec.id) row2.appendChild(mkBtn('ลบเอกสาร', 'btn btn-danger', async () => {
@@ -857,6 +867,103 @@ async function move(to) {
     toast('เปลี่ยนสถานะเป็น ' + to);
   } catch (e) { toast(e.message); }
 }
+
+/* ──────────────── พิมพ์แบบฟอร์ม A4 ──────────────── */
+/* พิมพ์ได้ทุกสถานะ ไม่ต้องรอส่งตรวจหรืออนุมัติ — ใบงานที่บันทึกแล้วพิมพ์ได้ทันที */
+async function openPrint() {
+  if (!S.rec || !S.rec.id) { toast('บันทึกใบงานก่อนจึงจะพิมพ์ได้'); return; }
+  const rec = S.rec;
+  const secs = sections().filter(g => PRINT.skipSections.indexOf(g.name) < 0);
+
+  const pv = $('#printview'); pv.innerHTML = ''; pv.classList.remove('hide');
+  const bar = el('div', 'pv-bar');
+  const btnPrint = el('button', 'btn btn-primary', 'กำลังเตรียมรูป…'); btnPrint.disabled = true;
+  const btnClose = el('button', 'btn', 'ปิด');
+  btnClose.addEventListener('click', () => { pv.classList.add('hide'); pv.innerHTML = ''; S.fitPage = null; });
+  bar.append(btnPrint, btnClose); pv.appendChild(bar);
+
+  const page = el('div', 'page'); pv.appendChild(page);
+  fitPage(page); S.fitPage = () => fitPage(page);
+  const head = el('div', 'p-head');
+  head.append(el('h2', null, PRINT.title), el('h3', null, PRINT.subtitle));
+  page.appendChild(head);
+
+  // ข้อมูลหัวเอกสาร: ช่องที่ไม่ใช่รูป เรียงตามลำดับในฟอร์ม
+  const info = el('div', 'p-info');
+  secs.forEach(g => g.items.filter(f => f.type !== 'image').forEach(f => {
+    const raw = rec.data[f.field_id];
+    const text = f.type === 'date' ? (raw ? thaiDate(raw) : '') : String(raw == null ? '' : raw);
+    // ช่องยาวหรือหลายบรรทัดกินเต็มแถว ไม่งั้นข้อความจะถูกตัดหายในคอลัมน์แคบ
+    const wide = f.type === 'textarea' || text.length > 38;
+    const row = el('div', 'p-f' + (wide ? ' wide' : ''));
+    row.appendChild(el('div', 'lb', f.label + ':'));
+    if (f.field_id === PRINT.unitField) {
+      const v = el('div', 'vl unit');
+      const num = Number(String(text).replace(/,/g, ''));
+      v.append(el('span', null, isNaN(num) || !text ? text : nf(num)), el('b', null, PRINT.unitText));
+      row.appendChild(v);
+    } else row.appendChild(el('div', 'vl', text));
+    info.appendChild(row);
+  }));
+  page.appendChild(info);
+
+  // กลุ่มรูป: กลุ่มละแถว 4 รูปตามแบบฟอร์มเดิม
+  const need = [];
+  secs.forEach(g => {
+    const imgs = g.items.filter(f => f.type === 'image');
+    if (!imgs.length) return;
+    page.appendChild(el('div', 'p-sec', g.name));
+    const grid = el('div', 'p-photos');
+    imgs.forEach(f => {
+      const cell = el('div', 'p-ph');
+      const v = rec.data[f.field_id];
+      if (v && v.full) { cell.appendChild(el('div', 'none', 'กำลังโหลด…')); need.push({ id: v.full, cell: cell }); }
+      else cell.appendChild(el('div', 'none', 'ไม่มีรูป'));
+      cell.appendChild(el('div', 'cap', f.label));
+      grid.appendChild(cell);
+    });
+    page.appendChild(grid);
+  });
+
+  const sign = el('div', 'p-sign');
+  PRINT.signers.forEach(role => {
+    const b = el('div', 'p-sb');
+    const nm = el('div', 'nm');
+    nm.append(document.createTextNode('('), el('i'), document.createTextNode(')'));
+    b.append(el('b', null, role), el('div', 'ln'), nm);
+    sign.appendChild(b);
+  });
+  page.appendChild(sign);
+
+  // ดึงภาพเต็มทีละ 4 รูป — ยิงทีเดียว 12 รูปทำให้คำตอบใหญ่เกินและ Apps Script ตอบช้ามาก
+  let done = 0;
+  for (let i = 0; i < need.length; i += 4) {
+    const part = need.slice(i, i + 4);
+    try {
+      const r = await api('files.batch', { ids: part.map(x => x.id) });
+      part.forEach(x => {
+        if (!r.files[x.id]) return;
+        const img = el('img'); img.src = r.files[x.id]; img.alt = '';
+        x.cell.replaceChild(img, x.cell.firstChild);
+      });
+    } catch (e) { toast('ดึงรูปบางส่วนไม่สำเร็จ: ' + e.message); }
+    done += part.length;
+    if (pv.classList.contains('hide')) return;          // ผู้ใช้ปิดไปแล้วระหว่างโหลด
+    btnPrint.textContent = 'กำลังเตรียมรูป… ' + done + '/' + need.length;
+  }
+  need.forEach(x => { if (x.cell.firstChild.className === 'none') x.cell.firstChild.textContent = 'โหลดรูปไม่สำเร็จ'; });
+
+  btnPrint.textContent = '🖨 พิมพ์เอกสาร'; btnPrint.disabled = false;
+  btnPrint.addEventListener('click', () => window.print());
+}
+
+/** กระดาษ A4 กว้างกว่าจอมือถือ ย่อให้พอดีเฉพาะตอนดูตัวอย่าง ตอนพิมพ์ CSS บังคับกลับเป็น 1 */
+function fitPage(page) {
+  const paper = 794;                                   // 210mm ที่ 96dpi
+  const avail = document.documentElement.clientWidth - 20;
+  page.style.zoom = avail < paper ? (avail / paper).toFixed(3) : '';
+}
+window.addEventListener('resize', () => { if (S.fitPage && !$('#printview').classList.contains('hide')) S.fitPage(); });
 
 /* ──────────────── ตั้งค่า: หัวข้อ + ผู้ใช้ ──────────────── */
 $('#btnSettings').addEventListener('click', openSettings);
