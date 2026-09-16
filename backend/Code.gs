@@ -20,6 +20,8 @@ const REQUIRE_COMPLETE_ON_SUBMIT = false;
 const DRIVE_ROOT_NAME  = 'TKF-ScrapSales-Files';
 // หัวข้อที่ระบบใช้เป็นคอลัมน์ดัชนี (ค้นหา/กรอง/เรียง) — ลบไม่ได้ ดู keyField()
 const PROTECTED_FIELDS = ['f_date', 'f_supplier'];
+const FIELD_QTY  = 'f_qty';       // ใช้รวมน้ำหนักในแดชบอร์ด
+const FIELD_ITEM = 'f_item';      // ใช้แทนหมวดเศษวัสดุในแดชบอร์ด
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024; // ต่อไฟล์
 const CACHE_TTL_SEC    = 1500;    // อายุแคช session/ผู้ใช้ (วินาที) — กันไม่ให้ต้องไล่อ่านชีตทุกคำขอ
 
@@ -64,6 +66,7 @@ function doPost(e) {
       case 'logout':         return json(handleLogout(req.token));
       case 'bootstrap':      return json(handleBootstrap(session));
       case 'records.list':   return json(handleRecordList(session, req));
+      case 'dashboard':      return json(handleDashboard(session, req));
       case 'records.get':    return json(handleRecordGet(session, req));
       case 'records.save':   return json(handleRecordSave(session, req));
       case 'records.move':   return json(handleRecordMove(session, req));
@@ -348,7 +351,9 @@ function handleRecordList(session, req) {
   const year = req.year ? Number(req.year) : 0;
   const month = req.month ? Number(req.month) : 0;
 
-  const listFieldIds = listFields().filter(function (f) { return f.in_list; }).map(function (f) { return f.field_id; });
+  const allFields = listFields();
+  const listFieldIds = allFields.filter(function (f) { return f.in_list; }).map(function (f) { return f.field_id; });
+  const visibleIds = allFields.filter(function (f) { return f.visible; }).map(function (f) { return f.field_id; });
   const rows = [];
   // นับตามตัวกรองปี/เดือน/คำค้นที่ใช้อยู่ (แต่ไม่กรองด้วยสถานะ) ตัวเลขบนแท็บจะได้ตรงกับแถวที่เห็นจริง
   const counts = {};
@@ -375,7 +380,9 @@ function handleRecordList(session, req) {
       id: o.id, status: o.status, doc_date: fmtDate(o.doc_date), supplier: o.supplier,
       created_by: o.created_by, updated_at: fmtDateTime(o.updated_at),
       updated_ms: o.updated_at ? new Date(o.updated_at).getTime() : 0,
-      photos: countPhotos(dj), brief: brief
+      photos: countPhotos(dj), brief: brief,
+      // จำนวนช่องที่กรอกแล้ว ใช้วาดแถบความคืบหน้าบนการ์ด — นับที่นี่เพราะหน้าเว็บไม่ได้รับ data_json
+      filled: visibleIds.filter(function (fid) { return dj[fid]; }).length
     });
   }
   rows.sort(function (a, b) { return (b.doc_date || '').localeCompare(a.doc_date || ''); });
@@ -539,6 +546,79 @@ function nextId() {
   return day + '-' + String(n).padStart(3, '0');   // เกิน 999 ใบ/วัน จะยาวขึ้นเอง ไม่ซ้ำกัน
 }
 
+/* ───────── แดชบอร์ด ─────────
+   สรุปยอดที่ฝั่งเซิร์ฟเวอร์ ไม่ส่งทั้ง data_json ของทุกใบไปให้หน้าเว็บคำนวณเอง
+   หมวดเศษวัสดุใช้ช่อง "รายการสินค้า" (f_item) เพราะระบบยังไม่มีช่องหมวดแยกต่างหาก */
+function handleDashboard(session, req) {
+  need(session, 'read');
+  const year = req.year ? Number(req.year) : 0;
+  const month = req.month ? Number(req.month) : 0;
+  const cat = String(req.cat || '');
+  const sup = String(req.supplier || '');
+
+  const data = sheet(SH.records).getDataRange().getValues();
+  const head = data[0];
+  const statusCount = {}, byMonth = {}, bySup = {}, byCat = {};
+  const aging = { fresh: 0, warn: 0, late: 0 };
+  const cats = {}, sups = {};
+  let docs = 0, weight = 0, waiting = 0;
+  Object.keys(STATUS).forEach(function (k) { statusCount[STATUS[k]] = 0; });
+
+  for (let i = 1; i < data.length; i++) {
+    const o = rowObj(head, data[i], i + 1);
+    if (!o.id) continue;
+    const dj = safeParse(o.data_json);
+    const item = String(dj[FIELD_ITEM] || '').trim();
+    const supplier = String(o.supplier || '').trim();
+    // เก็บรายชื่อไว้ทำ dropdown ก่อนกรอง ไม่งั้นเลือกแล้วตัวเลือกอื่นจะหายไป
+    if (item) cats[item] = true;
+    if (supplier) sups[supplier] = true;
+
+    let mKey = '';
+    if (o.doc_date) {
+      const d = new Date(o.doc_date);
+      if (!isNaN(d)) {
+        if (year && d.getFullYear() !== year) continue;
+        if (month && (d.getMonth() + 1) !== month) continue;
+        mKey = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2);
+      }
+    } else if (year || month) continue;
+    if (cat && item !== cat) continue;
+    if (sup && supplier !== sup) continue;
+
+    const qty = Number(String(dj[FIELD_QTY] || '').replace(/[^0-9.\-]/g, '')) || 0;
+    docs++; weight += qty;
+    statusCount[o.status] = (statusCount[o.status] || 0) + 1;
+    if (mKey) byMonth[mKey] = (byMonth[mKey] || 0) + qty;
+    if (supplier) bySup[supplier] = (bySup[supplier] || 0) + qty;
+    if (item) byCat[item] = (byCat[item] || 0) + qty;
+
+    if (o.status === STATUS.submitted || o.status === STATUS.reviewed) {
+      waiting++;
+      const days = o.updated_at ? Math.floor((Date.now() - new Date(o.updated_at).getTime()) / 86400000) : 0;
+      if (days <= 3) aging.fresh++; else if (days <= 7) aging.warn++; else aging.late++;
+    }
+  }
+
+  return {
+    ok: true, docs: docs, weight: weight, waiting: waiting,
+    statusCount: statusCount, aging: aging,
+    months: sortedPairs(byMonth, 6, true),
+    suppliers: sortedPairs(bySup, 5, false),
+    cats: sortedPairs(byCat, 5, false),
+    catOptions: Object.keys(cats).sort(),
+    supOptions: Object.keys(sups).sort()
+  };
+}
+
+/** แปลง {key: ยอด} เป็น [{name, value}] — byKey=true เรียงตามชื่อคีย์ (เดือน) ไม่ใช่ตามยอด */
+function sortedPairs(obj, limit, byKey) {
+  const out = Object.keys(obj).map(function (k) { return { name: k, value: obj[k] }; });
+  out.sort(byKey ? function (a, b) { return a.name < b.name ? -1 : 1; }
+                 : function (a, b) { return b.value - a.value; });
+  return byKey ? out.slice(-limit) : out.slice(0, limit);
+}
+
 function keyField(kind) {
   // field_id ที่ใช้เป็นคอลัมน์ดัชนีสำหรับค้นหา/กรอง
   return kind === 'date' ? 'f_date' : 'f_supplier';
@@ -547,6 +627,16 @@ function keyField(kind) {
 // ───────────────────────── Files (รูป/เอกสารแนบ) ─────────────────────────
 function handleFileUpload(session, req) {
   need(session, 'write');
+  // purgeFieldFiles ลบแถวตามเลขดัชนี ถ้าอัปโหลดพร้อมกันหลายรูป ดัชนีจะเลื่อนใต้กันเอง
+  // แล้วลบผิดแถว จึงต้องให้เข้าทีละคำขอ (หน้าเว็บก็ทยอยส่งอยู่แล้ว)
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    return uploadInner(session, req);
+  } finally { lock.releaseLock(); }
+}
+
+function uploadInner(session, req) {
   const recordId = String(req.recordId || '');
   const fieldId = String(req.fieldId || '');
   if (!recordId || !fieldId) return { ok: false, error: 'ข้อมูลไม่ครบ' };

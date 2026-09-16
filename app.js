@@ -3,16 +3,34 @@
    ทุกอย่างถามไปที่ Apps Script และสิทธิ์ถูกตรวจที่ฝั่งนั้น */
 
 const CONFIG = {
-  // 👇 วาง URL ของ Apps Script Web App (ลงท้ายด้วย /exec) ตรงนี้
   API: 'https://script.google.com/macros/s/AKfycby6tukJzC1NMnu1xN0nJTBI9p0GHTFK4vlnQs6ogXZYB5LE-oDTKF-ImvdXoCSMM8FQeg/exec',
   THUMB: 320,   // ความกว้างภาพย่อ (px)
   FULL: 1400,   // ความกว้างภาพเต็ม (px)
   QUALITY: 0.82
 };
 
-const S = { token: null, user: null, fields: [], perm: {}, status: '', rows: [], rec: null, dirty: false };
+const S = {
+  token: null, user: null, fields: [], perm: {}, statuses: {}, protected: [],
+  view: 'list', status: '', rows: [], rec: null, step: 0, dirty: false,
+  up: {},          // fieldId -> { pct, state }  สถานะอัปโหลดที่กำลังวิ่งอยู่
+  thumbs: {}       // fileId -> dataURL  กันดึงรูปเดิมซ้ำ
+};
+
 const $ = (s, r) => (r || document).querySelector(s);
 const el = (t, c, txt) => { const n = document.createElement(t); if (c) n.className = c; if (txt != null) n.textContent = txt; return n; };
+const svg = (d, w) => {
+  const n = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  n.setAttribute('viewBox', '0 0 24 24'); n.setAttribute('width', w || 20); n.setAttribute('height', w || 20);
+  n.setAttribute('fill', 'none'); n.setAttribute('stroke', 'currentColor'); n.setAttribute('stroke-width', '1.8');
+  n.innerHTML = d; return n;
+};
+const ICON = {
+  cam: '<path d="M3 8.5A1.5 1.5 0 014.5 7h2L8 5h8l1.5 2h2A1.5 1.5 0 0121 8.5v9A1.5 1.5 0 0119.5 19h-15A1.5 1.5 0 013 17.5v-9z"/><circle cx="12" cy="13" r="3.4"/>',
+  check: '<path d="M5 13l4 4 10-10"/>',
+  right: '<path d="M9 5l7 7-7 7"/>',
+  warn: '<circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16h.01"/>',
+  box: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 10h8M8 14h5"/>'
+};
 
 /* ──────────────── API ──────────────── */
 async function api(action, payload) {
@@ -28,7 +46,23 @@ async function api(action, payload) {
   } catch (e) {
     throw new Error('ติดต่อเซิร์ฟเวอร์ไม่ได้ — ตรวจการเชื่อมต่อเน็ต หรือ URL ใน app.js');
   }
-  const text = await res.text();
+  return unwrap(await res.text());
+}
+
+/** อัปโหลดผ่าน XHR เพื่ออ่านเปอร์เซ็นต์จริง fetch ยังบอกความคืบหน้าขาส่งไม่ได้ */
+function apiUpload(payload, onPct) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', CONFIG.API, true);
+    xhr.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
+    xhr.upload.onprogress = e => { if (e.lengthComputable && onPct) onPct(Math.round(e.loaded / e.total * 100)); };
+    xhr.onload = () => { try { resolve(unwrap(xhr.responseText)); } catch (e) { reject(e); } };
+    xhr.onerror = () => reject(new Error('อัปโหลดไม่สำเร็จ — ตรวจการเชื่อมต่อเน็ต'));
+    xhr.send(JSON.stringify(Object.assign({ action: 'files.upload', token: S.token }, payload)));
+  });
+}
+
+function unwrap(text) {
   let out;
   try { out = JSON.parse(text); }
   catch (e) { throw new Error('เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง (อาจยังไม่ได้ deploy แบบ "ทุกคน")'); }
@@ -41,30 +75,26 @@ async function api(action, payload) {
 
 function toast(msg) {
   const old = $('#toast'); if (old) old.remove();
-  // แถบปุ่มล่างสูงไม่เท่ากันเมื่อปุ่มตัดบรรทัดบนมือถือ จึงวัดความสูงจริงแทนการกำหนดค่าตายตัว
   const foot = $('#edFoot');
-  const lift = (!$('#editor').classList.contains('hide') && foot && foot.offsetHeight)
-    ? foot.offsetHeight + 16 : 24;
+  const lift = (!$('#editor').classList.contains('hide') && foot && foot.offsetHeight) ? foot.offsetHeight + 16 : 24;
   document.body.style.setProperty('--toast-bottom', lift + 'px');
-  const t = el('div', null, msg); t.id = 'toast';
-  t.setAttribute('role', 'status');
+  const t = el('div', null, msg); t.id = 'toast'; t.setAttribute('role', 'status');
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 2800);
 }
 
 /* ──────────────── เข้า/ออกระบบ ──────────────── */
-$('#loginForm').addEventListener('submit', async (ev) => {
+$('#loginForm').addEventListener('submit', async ev => {
   ev.preventDefault();
   const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'กำลังเข้าสู่ระบบ…';
   $('#loginMsg').innerHTML = '';
   try {
     const r = await api('login', { username: $('#u').value, password: $('#p').value });
-    S.token = r.token;
-    sessionStorage.setItem('tkf_token', r.token);
+    S.token = r.token; sessionStorage.setItem('tkf_token', r.token);
     $('#p').value = '';
     await start();
   } catch (e) {
-    $('#loginMsg').innerHTML = `<div class="msg msg-err">${esc(e.message)}</div>`;
+    $('#loginMsg').innerHTML = `<div class="msg-err">${esc(e.message)}</div>`;
   } finally { btn.disabled = false; btn.textContent = 'เข้าสู่ระบบ'; }
 });
 
@@ -73,28 +103,29 @@ function signOut(reason) {
   if (reason && S.dirty && S.rec) {
     try { sessionStorage.setItem('tkf_draft', JSON.stringify(S.rec)); } catch (e) {}
   }
-  S.token = null; S.dirty = false; sessionStorage.removeItem('tkf_token');
-  $('#app').inert = false; S.returnFocus = null;
+  S.token = null; S.dirty = false; S.rec = null; S.up = {}; S.thumbs = {};
+  sessionStorage.removeItem('tkf_token');
+  $('#app').inert = false;
   $('#app').classList.add('hide'); $('#editor').classList.add('hide'); $('#login').classList.remove('hide');
-  if (reason) $('#loginMsg').innerHTML = `<div class="msg msg-err">${esc(reason)}</div>`;
+  if (reason) $('#loginMsg').innerHTML = `<div class="msg-err">${esc(reason)}</div>`;
 }
 
 $('#btnLogout').addEventListener('click', async () => {
+  if (S.dirty && !confirm('มีการแก้ไขที่ยังไม่ได้บันทึก ต้องการออกจากระบบหรือไม่?')) return;
   try { await api('logout'); } catch (e) {}
   signOut();
 });
 
 async function start() {
   const b = await api('bootstrap');
-  S.user = b.user; S.fields = b.fields; S.perm = b.permissions; S.statuses = b.statuses;
-  S.protected = b.protectedFields || [];
+  S.user = b.user; S.fields = b.fields; S.perm = b.permissions;
+  S.statuses = b.statuses; S.protected = b.protectedFields || [];
   $('#whoName').textContent = b.user.name;
   $('#whoRole').textContent = roleLabel(b.user.role);
-  $('#btnNew').hidden = !S.perm.write;
   $('#btnSettings').hidden = !(S.perm.fields || S.perm.users);
   $('#login').classList.add('hide'); $('#app').classList.remove('hide');
   buildTabs(); buildDateFilters();
-  await refresh();
+  await switchView('list');
   restoreDraft();
 }
 
@@ -103,45 +134,72 @@ function restoreDraft() {
   if (!raw) return;
   sessionStorage.removeItem('tkf_draft');
   try {
-    S.rec = JSON.parse(raw);
-    S.dirty = true;
-    renderEditor();
-    showEditor();
-    if (S.rec.id) loadThumbs();
+    S.rec = JSON.parse(raw); S.dirty = true; S.step = 0;
+    openEditor();
     toast('กู้คืนข้อมูลที่กรอกค้างไว้แล้ว — กดบันทึกเพื่อยืนยัน');
   } catch (e) {}
 }
 
 const roleLabel = r => ({ admin: 'ผู้ดูแลระบบ', staff: 'พนักงานบริการสำนักงาน', supervisor: 'ผู้จัดการแผนก', manager: 'ผู้จัดการฝ่าย', viewer: 'ผู้ดูอย่างเดียว' }[r] || r);
+const statusColor = s => ({ [S.statuses.draft]: 'var(--draft)', [S.statuses.submitted]: 'var(--wait)',
+  [S.statuses.reviewed]: 'var(--check)', [S.statuses.complete]: 'var(--done)', [S.statuses.rejected]: 'var(--back)' }[s] || 'var(--draft)');
+
+/* ──────────────── สลับมุมมอง ──────────────── */
+$('#viewTabs').addEventListener('click', e => {
+  const b = e.target.closest('button[data-v]'); if (b) switchView(b.dataset.v);
+});
+
+async function switchView(v) {
+  S.view = v;
+  document.querySelectorAll('#viewTabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.v === v)));
+  $('#viewTitle').textContent = v === 'dash' ? 'แดชบอร์ด' : 'ใบงานขายเศษวัสดุ';
+  $('#listFilters').classList.toggle('hide', v !== 'list');
+  $('#dashFilters').classList.toggle('hide', v !== 'dash');
+  $('#footCreate').classList.toggle('hide', !(v === 'list' && S.perm.write));
+  if (v === 'dash') { buildDashFilters(); await loadDash(); } else { await refresh(); }
+}
 
 /* ──────────────── แท็บ + ตัวกรอง ──────────────── */
 function buildTabs() {
   const tabs = $('#tabs'); tabs.innerHTML = '';
-  const all = [['', 'ทั้งหมด']].concat(Object.values(S.statuses).map(v => [v, v]));
-  all.forEach(([val, label]) => {
+  [['', 'ทั้งหมด']].concat(Object.values(S.statuses).map(v => [v, v])).forEach(([val, label]) => {
     const b = el('button', 'tab'); b.type = 'button'; b.setAttribute('role', 'tab');
-    b.setAttribute('aria-selected', String(val === S.status));
-    b.dataset.v = val;
-    b.append(document.createTextNode(label), el('span', 'n', '0'));
+    b.setAttribute('aria-selected', String(val === S.status)); b.dataset.v = val;
+    const dot = el('span', 'dot'); if (val) dot.style.background = statusColor(val);
+    b.append(dot, document.createTextNode(label), el('span', 'n', '0'));
     b.addEventListener('click', () => { S.status = val; buildTabs(); refresh(); });
     tabs.appendChild(b);
   });
 }
 
-function buildDateFilters() {
-  const y = $('#fYear'), m = $('#fMonth');
+function yearOptions(sel, allLabel) {
   const now = new Date().getFullYear();
-  y.innerHTML = '<option value="">ทุกปี</option>';
-  for (let i = now; i >= now - 4; i--) y.insertAdjacentHTML('beforeend', `<option value="${i}">${i + 543}</option>`);
-  const mn = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
-  m.innerHTML = '<option value="">ทุกเดือน</option>' + mn.map((t, i) => `<option value="${i + 1}">${t}</option>`).join('');
-  [y, m].forEach(s => s.addEventListener('change', refresh));
+  sel.innerHTML = `<option value="">${allLabel}</option>`;
+  for (let i = now; i >= now - 4; i--) sel.insertAdjacentHTML('beforeend', `<option value="${i}">${i + 543}</option>`);
+}
+const MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+function monthOptions(sel, allLabel) {
+  sel.innerHTML = `<option value="">${allLabel}</option>` + MONTHS.map((t, i) => `<option value="${i + 1}">${t}</option>`).join('');
+}
+
+function buildDateFilters() {
+  yearOptions($('#fYear'), 'ทุกปี'); monthOptions($('#fMonth'), 'ทุกเดือน');
+  [$('#fYear'), $('#fMonth')].forEach(s => s.addEventListener('change', refresh));
   let timer; $('#q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(refresh, 350); });
 }
 
-/* ──────────────── รายการเอกสาร ──────────────── */
+function buildDashFilters() {
+  if ($('#dYear').options.length) return;
+  yearOptions($('#dYear'), 'ทุกปี'); monthOptions($('#dMonth'), 'ทุกเดือน');
+  $('#dCat').innerHTML = '<option value="">ทุกหมวด</option>';
+  $('#dSup').innerHTML = '<option value="">ทุกซัพพลายเออร์</option>';
+  ['#dYear', '#dMonth', '#dCat', '#dSup'].forEach(s => $(s).addEventListener('change', loadDash));
+}
+
+/* ──────────────── รายการใบงาน ──────────────── */
 async function refresh() {
-  $('#list').innerHTML = '<div class="empty">กำลังโหลด…</div>';
+  const host = $('#viewBody');
+  host.innerHTML = '<div class="empty"><b>กำลังโหลด…</b></div>';
   try {
     const r = await api('records.list', {
       status: S.status, q: $('#q').value, year: $('#fYear').value, month: $('#fMonth').value
@@ -149,102 +207,234 @@ async function refresh() {
     S.rows = r.rows;
     document.querySelectorAll('.tab').forEach(t => {
       const v = t.dataset.v;
-      const n = v ? (r.counts[v] || 0) : Object.values(r.counts).reduce((a, b) => a + b, 0);
-      $('.n', t).textContent = n;
+      $('.n', t).textContent = v ? (r.counts[v] || 0) : Object.values(r.counts).reduce((a, b) => a + b, 0);
     });
     renderList();
   } catch (e) {
-    $('#list').innerHTML = `<div class="empty"><b>โหลดข้อมูลไม่สำเร็จ</b>${esc(e.message)}</div>`;
+    host.innerHTML = `<div class="empty"><b>โหลดข้อมูลไม่สำเร็จ</b><p>${esc(e.message)}</p></div>`;
   }
 }
 
 function renderList() {
-  const host = $('#list');
+  const host = $('#viewBody'); host.innerHTML = '';
   if (!S.rows.length) {
-    host.innerHTML = `<div class="empty"><b>ยังไม่มีเอกสารในมุมมองนี้</b>${S.perm.write ? 'กดปุ่ม “สร้างรายการ” เพื่อเริ่มบันทึก' : 'ลองเปลี่ยนตัวกรองด้านบน'}</div>`;
+    const em = el('div', 'empty');
+    em.append(svg(ICON.box, 28), el('b', null, 'ไม่มีใบงานในตัวกรองนี้'),
+      el('p', null, 'ลองเปลี่ยนสถานะหรือล้างคำค้น'));
+    const c = el('button', 'btn', 'ล้างตัวกรอง');
+    c.addEventListener('click', () => {
+      $('#q').value = ''; $('#fYear').value = ''; $('#fMonth').value = '';
+      S.status = ''; buildTabs(); refresh();
+    });
+    em.appendChild(c); host.appendChild(em);
     return;
   }
   const cols = S.fields.filter(f => f.in_list && f.visible);
-  const t = el('table');
-  const thead = el('thead'), tr = el('tr');
-  ['เลขที่'].concat(cols.map(c => c.label)).concat(['รูป', 'สถานะ', 'แก้ไขล่าสุด'])
-    .forEach(h => tr.appendChild(el('th', null, h)));
-  thead.appendChild(tr); t.appendChild(thead);
+  const total = S.fields.filter(f => f.visible).length || 1;
 
-  const tb = el('tbody');
   S.rows.forEach(row => {
-    const r = el('tr');
-    r.tabIndex = 0;
-    r.appendChild(el('td', 'c-id', row.id));
-    cols.forEach(c => {
-      const td = el('td', 'c-field', fmtCell(c, row.brief[c.field_id]));
-      td.dataset.label = c.label;   // ใช้เป็นป้ายกำกับตอนตารางกลายเป็นการ์ดบนมือถือ
-      r.appendChild(td);
-    });
-    const ph = el('td', 'c-meta', row.photos ? row.photos + ' รูป' : '—');
-    ph.dataset.label = 'รูป'; r.appendChild(ph);
+    const color = statusColor(row.status);
+    const b = el('button', 'doc'); b.type = 'button'; b.style.borderLeftColor = color;
 
-    const st = el('td', 'c-status');
-    st.appendChild(statusPill(row.status));
-    const waiting = waitingDays(row);
-    if (waiting) st.appendChild(el('span', 'age', waiting));
-    r.appendChild(st);
+    const th = el('div', 'thumb');
+    th.appendChild(el('span', null, row.photos ? row.photos + ' รูป' : 'ไม่มีรูป'));
 
-    const up = el('td', 'c-meta', row.updated_at); up.dataset.label = 'แก้ไขล่าสุด';
-    r.appendChild(up);
+    const body = el('div', 'body');
+    const l1 = el('div', 'line1');
+    l1.appendChild(el('span', 'id', row.id));
+    const pill = el('span', 'pill'); pill.style.color = color;
+    pill.append(el('span', 'dot'), document.createTextNode(row.status));
+    l1.appendChild(pill);
+    const waiting = waitingLabel(row);
+    if (waiting) { const a = el('span', 'age', waiting.text); a.style.color = waiting.color; l1.appendChild(a); }
+    body.appendChild(l1);
 
-    const open = () => openRecord(row.id);
-    r.addEventListener('click', open);
-    r.addEventListener('keydown', e => { if (e.key === 'Enter') open(); });
-    tb.appendChild(r);
+    const main = cols.slice(0, 2).map(c => fmtCell(c, row.brief[c.field_id])).filter(v => v !== '—').join(' · ');
+    body.appendChild(el('div', 'main', main || '—'));
+    // ไม่ต่อวันที่เอกสารท้ายแถวถ้ามีคอลัมน์ชนิดวันที่แสดงอยู่แล้ว ไม่งั้นการ์ดจะขึ้นวันเดียวกันสองที่
+    const hasDateCol = cols.some(c => c.type === 'date' && row.brief[c.field_id]);
+    const meta = cols.slice(2).map(c => fmtCell(c, row.brief[c.field_id])).filter(v => v !== '—')
+      .concat([!hasDateCol && row.doc_date ? thaiDate(row.doc_date) : '']).filter(Boolean).join(' · ');
+    body.appendChild(el('div', 'meta', meta || 'แก้ไขล่าสุด ' + row.updated_at));
+
+    const done = Math.round((row.filled || 0) / total * 100);
+    const pr = el('div', 'prow');
+    const bar = el('div', 'pbar'); const fill = el('i');
+    fill.style.width = done + '%'; fill.style.background = color; bar.appendChild(fill);
+    pr.append(bar, el('span', null, (row.filled || 0) + '/' + total));
+    body.appendChild(pr);
+
+    b.append(th, body);
+    b.addEventListener('click', () => openRecord(row.id));
+    host.appendChild(b);
   });
-  t.appendChild(tb);
-  host.innerHTML = ''; host.appendChild(t);
 }
 
 function fmtCell(col, v) {
   if (v == null || v === '') return '—';
-  return col.type === 'date' ? thaiDate(v) : String(v);
+  if (col.type === 'date') return thaiDate(v);
+  if (col.type === 'number') { const x = Number(String(v).replace(/,/g, '')); if (!isNaN(x)) return nf(x); }
+  return String(v);
 }
 
 /** เอกสารที่รอคนเซ็นอยู่ ควรบอกว่ารอมานานแค่ไหน ไม่ใช่แค่วันที่ดิบ */
-function waitingDays(row) {
-  if ([S.statuses.submitted, S.statuses.reviewed].indexOf(row.status) < 0) return '';
-  if (!row.updated_ms) return '';   // ใช้เวลาแบบ epoch ข้อความ 'yyyy-MM-dd HH:mm' จะถูกอ่านเป็นเวลาเครื่องผู้ใช้
+function waitingLabel(row) {
+  if ([S.statuses.submitted, S.statuses.reviewed].indexOf(row.status) < 0) return null;
+  if (!row.updated_ms) return null;
   const d = Math.floor((Date.now() - row.updated_ms) / 86400000);
-  if (d <= 0) return 'รอมาวันนี้';
-  return 'รอมา ' + d + ' วัน';
+  if (d <= 0) return { text: 'รอมาวันนี้', color: 'var(--muted)' };
+  return { text: 'รอมา ' + d + ' วัน', color: d > 7 ? 'var(--back)' : d > 3 ? 'var(--wait)' : 'var(--muted)' };
 }
 
-function statusPill(s) {
-  const p = el('span', 'pill', s); p.dataset.s = s; return p;
-}
-
-/* ──────────────── หน้าเอกสาร ──────────────── */
 $('#btnNew').addEventListener('click', () => openRecord(null));
-$('#edClose').addEventListener('click', closeEditor);
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !$('#editor').classList.contains('hide')) closeEditor();
-});
 
-function closeEditor() {
-  if (S.dirty && !confirm('มีการแก้ไขที่ยังไม่ได้บันทึก ต้องการออกโดยไม่บันทึกหรือไม่?')) return;
-  S.dirty = false; S.rec = null;
-  $('#editor').classList.add('hide');
-  $('#app').inert = false;
-  if (S.returnFocus && document.contains(S.returnFocus)) S.returnFocus.focus();
-  S.returnFocus = null;
-  refresh();
+/* ──────────────── แดชบอร์ด ──────────────── */
+const nf = n => Number(n || 0).toLocaleString('th-TH', { maximumFractionDigits: 0 });
+
+async function loadDash() {
+  const host = $('#viewBody');
+  host.innerHTML = '<div class="empty"><b>กำลังโหลด…</b></div>';
+  try {
+    const d = await api('dashboard', {
+      year: $('#dYear').value, month: $('#dMonth').value,
+      cat: $('#dCat').value, supplier: $('#dSup').value
+    });
+    syncOptions($('#dCat'), d.catOptions, 'ทุกหมวด');
+    syncOptions($('#dSup'), d.supOptions, 'ทุกซัพพลายเออร์');
+    renderDash(d);
+  } catch (e) {
+    host.innerHTML = `<div class="empty"><b>โหลดแดชบอร์ดไม่สำเร็จ</b><p>${esc(e.message)}</p></div>`;
+  }
 }
 
-/** เปิดหน้าเอกสารแบบ dialog: ล็อกโฟกัสไว้ข้างใน ไม่ให้ tab หลุดไปโดนตารางที่อยู่ข้างหลัง */
-function showEditor() {
-  S.returnFocus = document.activeElement;
-  $('#editor').classList.remove('hide');
-  $('#app').inert = true;
-  $('#editor').scrollTop = 0;
-  $('#edClose').focus();
+function syncOptions(sel, list, allLabel) {
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">${allLabel}</option>` +
+    (list || []).map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  sel.value = cur;
+  if (sel.value !== cur) sel.value = '';   // ตัวเลือกเดิมหายไปแล้ว (ข้อมูลถูกลบ) → กลับไปทุกหมวด
 }
+
+function renderDash(d) {
+  const host = $('#viewBody'); host.innerHTML = '';
+  if (!d.docs) {
+    const em = el('div', 'empty');
+    em.append(el('b', null, 'ไม่มีข้อมูลในช่วงที่เลือก'));
+    const c = el('button', 'btn', 'ล้างตัวกรอง');
+    c.addEventListener('click', () => { ['#dYear', '#dMonth', '#dCat', '#dSup'].forEach(s => $(s).value = ''); loadDash(); });
+    em.appendChild(c); host.appendChild(em); return;
+  }
+  const late = d.aging.late;
+  host.appendChild(kpiGrid([
+    { label: 'ใบงานทั้งหมด', value: nf(d.docs), unit: 'ใบ', note: 'ในช่วงที่เลือก', noteColor: 'var(--muted)' },
+    { label: 'น้ำหนักรวม', value: nf(d.weight), unit: 'กก.', note: 'จากช่องปริมาณ', noteColor: 'var(--muted)' },
+    { label: 'รอดำเนินการ', value: nf(d.waiting), unit: 'ใบ', note: 'รอตรวจ/รออนุมัติ', noteColor: 'var(--wait)' },
+    { label: 'ค้างเกิน 7 วัน', value: nf(late), unit: 'ใบ',
+      note: late ? 'ต้องตามเร่ง' : 'ไม่มีใบค้าง', noteColor: late ? 'var(--back)' : 'var(--done)' }
+  ]));
+
+  if (d.months.length) {
+    const p = panel('น้ำหนักขายรายเดือน', d.months.length + ' เดือนล่าสุด');
+    const max = Math.max.apply(null, d.months.map(m => m.value)) || 1;
+    const bars = el('div', 'bars');
+    d.months.forEach(m => {
+      const c = el('div', 'col');
+      const i = el('i'); i.style.height = Math.max(4, Math.round(m.value / max * 150)) + 'px';
+      c.append(el('b', null, nf(m.value)), i, el('small', null, monthShort(m.name)));
+      bars.appendChild(c);
+    });
+    p.appendChild(bars); host.appendChild(p);
+  }
+
+  const mixTotal = Object.values(d.statusCount).reduce((a, b) => a + b, 0) || 1;
+  const p2 = panel('สถานะใบงาน', mixTotal + ' ใบ');
+  const mix = el('div', 'mix');
+  Object.keys(d.statusCount).forEach(k => {
+    if (!d.statusCount[k]) return;
+    const i = el('div'); i.style.flex = d.statusCount[k]; i.style.background = statusColor(k); mix.appendChild(i);
+  });
+  p2.appendChild(mix);
+  Object.keys(d.statusCount).forEach(k => {
+    const row = el('div', 'legend');
+    const sw = el('span', 'sw'); sw.style.background = statusColor(k);
+    row.append(sw, el('span', 'nm', k), el('span', 'pc', Math.round(d.statusCount[k] / mixTotal * 100) + '%'),
+      el('span', 'n', String(d.statusCount[k])));
+    p2.appendChild(row);
+  });
+  host.appendChild(p2);
+
+  if (d.waiting) {
+    const p3 = panel('อายุใบงานที่รอดำเนินการ');
+    const maxA = Math.max(d.aging.fresh, d.aging.warn, d.aging.late) || 1;
+    [['ไม่เกิน 3 วัน', d.aging.fresh, 'var(--done)'], ['4–7 วัน', d.aging.warn, 'var(--wait)'],
+     ['เกิน 7 วัน', d.aging.late, 'var(--back)']].forEach(([lab, n, col]) => {
+      const r = el('div', 'hrow');
+      const tr = el('div', 'track'); const i = el('i');
+      i.style.width = Math.round(n / maxA * 100) + '%'; i.style.background = col; tr.appendChild(i);
+      r.append(el('div', 'lab', lab), tr, el('div', 'n', String(n)));
+      p3.appendChild(r);
+    });
+    host.appendChild(p3);
+  }
+
+  if (d.suppliers.length) host.appendChild(rankPanel('ซัพพลายเออร์ตามน้ำหนัก', d.suppliers));
+  if (d.cats.length) host.appendChild(rankPanel('รายการสินค้าตามน้ำหนัก', d.cats));
+}
+
+function panel(title, right) {
+  const p = el('div', 'panel');
+  const h = el('div', 'head');
+  h.appendChild(el('h3', null, title));
+  if (right) h.appendChild(el('div', 'sub', right));
+  p.appendChild(h); return p;
+}
+
+function rankPanel(title, list) {
+  const p = panel(title);
+  const max = Math.max.apply(null, list.map(x => x.value)) || 1;
+  list.forEach(x => {
+    const r = el('div', 'rank');
+    const t = el('div', 't');
+    t.append(el('span', null, x.name), el('span', null, nf(x.value) + ' กก.'));
+    const tr = el('div', 'track'); const i = el('i');
+    i.style.width = Math.round(x.value / max * 100) + '%'; tr.appendChild(i);
+    r.append(t, tr); p.appendChild(r);
+  });
+  return p;
+}
+
+function kpiGrid(items) {
+  const g = el('div', 'kpis');
+  items.forEach(k => {
+    const c = el('div', 'kpi');
+    const v = el('div', 'val', k.value);
+    v.appendChild(el('span', 'unit', ' ' + k.unit));
+    const note = el('div', 'knote', k.note); note.style.color = k.noteColor;
+    c.append(el('div', 'label', k.label), v, note);
+    g.appendChild(c);
+  });
+  return g;
+}
+
+const monthShort = key => {
+  const m = /^(\d{4})-(\d{2})$/.exec(key);
+  return m ? MONTHS[Number(m[2]) - 1] : key;
+};
+
+/* ──────────────── หน้าเอกสาร: แบ่งเป็นขั้น ──────────────── */
+/** จัดกลุ่มช่องตาม section — จำนวนขั้นมาจากข้อมูลจริง ไม่ได้ล็อกไว้ที่ 5 */
+function sections() {
+  const out = [];
+  S.fields.filter(f => f.visible).forEach(f => {
+    let g = out.find(x => x.name === f.section);
+    if (!g) { g = { name: f.section, items: [] }; out.push(g); }
+    g.items.push(f);
+  });
+  return out;
+}
+const filledIn = items => items.filter(f => S.rec.data[f.field_id]).length;
+const canEdit = () => S.perm.write && (S.user.role === 'admin' ||
+  [S.statuses.draft, S.statuses.rejected].indexOf(S.rec.status) >= 0);
 
 async function openRecord(id) {
   if (id) {
@@ -253,196 +443,220 @@ async function openRecord(id) {
   } else {
     S.rec = { id: null, status: S.statuses.draft, data: {}, sign: {}, created_by: S.user.username };
   }
-  S.openSections = null;   // เอกสารใหม่เริ่มที่ค่าเริ่มต้นเสมอ ไม่เอาสถานะพับ/กางของเอกสารก่อนหน้ามา
-  S.dirty = false;
-  renderEditor();
-  showEditor();
+  S.dirty = false; S.up = {};
+  S.step = canEdit() ? 0 : sections().length;   // ผู้ตรวจ/ผู้อนุมัติเปิดมาที่หน้าตรวจทานเลย
+  openEditor();
   if (id) loadThumbs();
 }
 
-function editable() {
-  if (!S.perm.write) return false;
-  if (S.user.role === 'admin') return true;
-  if (!S.rec.id) return true;
-  if ([S.statuses.draft, S.statuses.rejected].indexOf(S.rec.status) < 0) return false;
-  return S.rec.created_by === S.user.username;
+function openEditor() {
+  S.returnFocus = document.activeElement;
+  renderEditor();
+  $('#editor').classList.remove('hide');
+  $('#app').inert = true;
+  $('#edClose').focus();
 }
+
+$('#edClose').addEventListener('click', closeEditor);
+/** ลูกศรบนหัวออกจากเอกสารเสมอ การถอยทีละขั้นเป็นหน้าที่ของปุ่ม "ย้อนกลับ" ที่แถบล่าง
+ *  ถ้าให้ปุ่มเดียวทำสองอย่าง คนที่อยู่ขั้น 4 ต้องกดถึง 5 ครั้งกว่าจะออกได้ */
+function closeEditor() {
+  if (S.dirty && !confirm('มีการแก้ไขที่ยังไม่ได้บันทึก ต้องการออกโดยไม่บันทึกหรือไม่?')) return;
+  S.dirty = false; S.rec = null; S.up = {};
+  $('#editor').classList.add('hide'); $('#app').inert = false;
+  if (S.returnFocus && document.contains(S.returnFocus)) S.returnFocus.focus();
+  S.returnFocus = null;
+  if (S.view === 'dash') loadDash(); else refresh();
+}
+
+function goStep(n) { S.step = n; renderEditor(); $('#edBody').scrollTop = 0; loadThumbs(); }
 
 function renderEditor() {
-  const rec = S.rec, ed = editable();
-  $('#edTitle').textContent = rec.id ? 'เอกสาร ' + rec.id : 'สร้างรายการใหม่';
-  const sp = $('#edStatus'); sp.textContent = rec.status; sp.dataset.s = rec.status;
+  if (!S.rec) return;
+  const secs = sections();
+  const reviewStep = secs.length;
+  if (S.step > reviewStep) S.step = reviewStep;
+  const color = statusColor(S.rec.status);
 
+  $('#edTitle').textContent = S.rec.id || 'ใบงานใหม่';
+  $('#edHint').textContent = S.rec.id ? ('แก้ไขล่าสุด ' + (S.rec.updated_at || '—')) : 'ยังไม่ได้บันทึก';
+  const st = $('#edStatus'); st.textContent = ''; st.style.color = color;
+  st.append(el('span', 'dot'), document.createTextNode(S.rec.status));
+
+  renderSteps(secs, reviewStep);
   const body = $('#edBody'); body.innerHTML = '';
-
-  if (rec.status === S.statuses.rejected && rec.note) {
-    body.insertAdjacentHTML('beforeend', `<div class="msg msg-err"><b>ถูกตีกลับ:</b> ${esc(rec.note)}</div>`);
-  }
-  if (!ed && rec.id) {
-    body.insertAdjacentHTML('beforeend',
-      `<div class="msg msg-ok">เอกสารสถานะ “${esc(rec.status)}” อยู่ในโหมดอ่านอย่างเดียว</div>`);
-  }
-
-  // จัดกลุ่มตาม section ตามลำดับที่ตั้งไว้
-  const groups = [];
-  S.fields.filter(f => f.visible).forEach(f => {
-    let g = groups.find(x => x.name === f.section);
-    if (!g) { g = { name: f.section, items: [] }; groups.push(g); }
-    g.items.push(f);
-  });
-
-  groups.forEach((g, gi) => {
-    const sec = el('section', 'section');
-    const allPhotos = g.items.every(f => f.type === 'image');
-    const filled = g.items.filter(f => S.rec.data[f.field_id]).length;
-
-    // กลุ่มแรกเปิดไว้ ที่เหลือพับ — ฟอร์ม 26 ช่องบนมือถือยาวเกินกว่าจะกางทั้งหมด
-    const collapsed = (S.openSections && g.name in S.openSections)
-      ? !S.openSections[g.name]
-      : gi > 0;
-    if (collapsed) sec.classList.add('collapsed');
-
-    const h3 = el('h3');
-    const head = el('button', 'sechead'); head.type = 'button';
-    head.setAttribute('aria-expanded', String(!collapsed));
-    head.append(
-      el('span', 'chev', '▾'),
-      document.createTextNode(g.name),
-      el('span', 'count' + (filled === g.items.length ? ' full' : ''), filled + '/' + g.items.length)
-    );
-    head.addEventListener('click', () => {
-      sec.classList.toggle('collapsed');
-      const open = !sec.classList.contains('collapsed');
-      head.setAttribute('aria-expanded', String(open));
-      S.openSections = S.openSections || {};
-      S.openSections[g.name] = open;
-      if (open) loadThumbs();
-    });
-    h3.appendChild(head); sec.appendChild(h3);
-
-    const sb = el('div', 'section-body grid' + (allPhotos ? ' photos' : ''));
-    g.items.forEach(f => sb.appendChild(renderField(f, ed)));
-    sec.appendChild(sb);
-    body.appendChild(sec);
-  });
-
-  // ลายเซ็นตามขั้นตอน
-  if (rec.id) {
-    const sec = el('section', 'section');
-    sec.appendChild(el('h3', null, 'การลงนาม'));
-    const sb = el('div', 'section-body signs');
-    sb.innerHTML = `
-      <div><b>จัดทำ</b> — ${esc(rec.sign.staff || '—')}</div>
-      <div><b>ตรวจสอบ (ผู้จัดการแผนก)</b> — ${esc(rec.sign.supervisor || '—')}</div>
-      <div><b>รับทราบ (ผู้จัดการฝ่าย)</b> — ${esc(rec.sign.manager || '—')}</div>
-      <div style="margin-top:8px;color:var(--muted)">สร้างโดย ${esc(rec.created_by)} · แก้ไขล่าสุด ${esc(rec.updated_at || '')}</div>`;
-    sec.appendChild(sb); body.appendChild(sec);
-  }
-
-  renderFooter(ed);
+  if (S.step === reviewStep) renderReview(secs); else renderStep(secs[S.step]);
+  renderFooter(secs, reviewStep);
 }
 
-function renderField(f, ed) {
-  const wrap = el('div', 'field');
-  const lab = el('label', null, f.label);
-  lab.htmlFor = 'in_' + f.field_id;
-  if (f.required) lab.appendChild(el('span', 'req', ' *'));
-  wrap.appendChild(lab);
+function renderSteps(secs, reviewStep) {
+  const host = $('#edSteps'); host.innerHTML = '';
+  const total = S.fields.filter(f => f.visible).length || 1;
+  const done = filledIn(S.fields.filter(f => f.visible));
 
-  if (f.type === 'image') {
-    wrap.appendChild(photoBox(f, ed));
-    return wrap;
+  const row = el('div', 'steprow');
+  secs.concat([{ name: 'ตรวจทาน', items: [] }]).forEach((g, i) => {
+    const b = el('button'); b.type = 'button';
+    b.dataset.on = i === S.step ? '1' : '0';
+    b.dataset.done = (i < reviewStep && g.items.length && filledIn(g.items) === g.items.length) ? '1' : '0';
+    b.append(el('i'), el('span', null, shortName(g.name, i)));
+    b.title = g.name;
+    b.addEventListener('click', () => goStep(i));
+    row.appendChild(b);
+  });
+  host.appendChild(row);
+
+  const cur = S.step === reviewStep ? { name: 'ตรวจทานก่อนส่ง', items: [] } : secs[S.step];
+  const h = el('div', 'ed-h');
+  h.append(el('b', null, cur.name), el('small', null, 'ขั้นที่ ' + (S.step + 1) + ' / ' + (reviewStep + 1)));
+  host.appendChild(h);
+
+  const pr = el('div', 'prow');
+  const bar = el('div', 'pbar'); const fill = el('i');
+  fill.style.width = Math.round(done / total * 100) + '%'; bar.appendChild(fill);
+  pr.append(bar, el('span', null, done + ' / ' + total + ' ช่อง'));
+  host.appendChild(pr);
+
+  const remain = el('div', 'remain');
+  if (cur.items.length) {
+    const left = cur.items.length - filledIn(cur.items);
+    remain.textContent = left ? ('ขั้นนี้เหลืออีก ' + left + ' ช่อง') : '';
+    if (!left) { remain.textContent = 'ขั้นนี้ครบแล้ว'; remain.style.color = 'var(--done)'; }
+    else remain.style.color = 'var(--wait)';
   }
+  host.appendChild(remain);
+}
 
-  let input;
-  if (f.type === 'select') {
-    input = el('select');
-    input.appendChild(new Option('— เลือก —', ''));
-    f.options.forEach(o => input.appendChild(new Option(o, o)));
-  } else if (f.type === 'textarea') {
-    input = el('textarea'); input.rows = 3;
+const shortName = (n, i) => (i + 1) + '. ' + String(n).replace(/^ภาพ/, '').replace(/ดำเนินการ$/, '').trim();
+
+function renderStep(g) {
+  if (!g) return;
+  const body = $('#edBody');
+  const ed = canEdit();
+  const allPhotos = g.items.every(f => f.type === 'image');
+
+  if (allPhotos) {
+    const grid = el('div', 'slots' + (g.items.length === 1 ? ' one' : ''));
+    g.items.forEach(f => grid.appendChild(photoSlot(f, ed)));
+    body.appendChild(grid);
+    if (ed) {
+      const n = el('div', 'note');
+      n.append(svg(ICON.warn, 20), el('div', null, 'ถ่ายต่อได้เลย ระบบอัปโหลดเบื้องหลัง ไม่ต้องรอทีละรูป'));
+      $('svg', n).style.color = 'var(--wait)';
+      body.appendChild(n);
+    }
+    return;
+  }
+  g.items.forEach(f => body.appendChild(f.type === 'image' ? photoSlot(f, ed) : inputField(f, ed)));
+}
+
+function inputField(f, ed) {
+  const lab = el('label', 'field');
+  lab.appendChild(el('span', null, f.label + (f.required ? ' *' : '')));
+  let inp;
+  if (f.type === 'textarea') inp = el('textarea');
+  else if (f.type === 'select') {
+    inp = el('select');
+    inp.innerHTML = '<option value="">— เลือก —</option>' + f.options.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
   } else {
-    input = el('input');
-    input.type = { date: 'date', number: 'number' }[f.type] || 'text';
-    if (f.type === 'number') input.step = 'any';
+    inp = el('input');
+    inp.type = f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text';
+    if (f.type === 'number') inp.inputMode = 'decimal';
   }
-  input.id = 'in_' + f.field_id;
-  input.value = S.rec.data[f.field_id] != null ? S.rec.data[f.field_id] : '';
-  input.disabled = !ed;
-  input.addEventListener('input', () => { S.rec.data[f.field_id] = input.value; S.dirty = true; });
-  wrap.appendChild(input);
-  return wrap;
+  inp.value = S.rec.data[f.field_id] || '';
+  inp.disabled = !ed;
+  inp.addEventListener('input', () => { S.rec.data[f.field_id] = inp.value; S.dirty = true; });
+  inp.addEventListener('change', () => { S.rec.data[f.field_id] = inp.value; S.dirty = true; renderSteps(sections(), sections().length); });
+  lab.appendChild(inp);
+  return lab;
 }
 
-function photoBox(f, ed) {
-  const wrap = el('div', 'photo-wrap');
+/* ──────────────── ช่องรูป + คิวอัปโหลด ──────────────── */
+function photoSlot(f, ed) {
+  const wrap = el('div', 'slot');
   const v = S.rec.data[f.field_id];
+  const up = S.up[f.field_id];
 
-  // เป็น <button> จริง ไม่ใช่ div ที่ดักคลิก → ใช้คีย์บอร์ดแนบรูปได้ และ <label for> ผูกได้ถูกต้อง
-  const box = el('button', 'photo'); box.type = 'button'; box.id = 'ph_' + f.field_id;
+  const btn = el('button'); btn.type = 'button'; btn.id = 'ph_' + f.field_id;
   if (v && v.thumb) {
-    box.classList.add('filled');
-    box.appendChild(el('span', null, 'กำลังโหลดภาพ…'));
-    box.setAttribute('aria-label', 'ดูรูป ' + f.label + ' ขนาดเต็ม');
-  } else {
-    box.appendChild(el('span', null, ed ? '📷 แตะเพื่อเลือกรูป' : 'ไม่มีรูป'));
-    box.disabled = !ed;
-    box.setAttribute('aria-label', 'แนบรูป ' + f.label);
+    btn.classList.add('filled');
+    const cached = S.thumbs[v.thumb];
+    if (cached) { const img = el('img'); img.src = cached; img.alt = f.label; btn.appendChild(img); }
+    const ok = el('span', 'ok'); ok.appendChild(svg(ICON.check, 16));
+    $('svg', ok).setAttribute('stroke', '#fff'); $('svg', ok).setAttribute('stroke-width', '2.4');
+    btn.appendChild(ok);
+    btn.setAttribute('aria-label', 'ดูรูป ' + f.label + ' ขนาดเต็ม');
+  } else if (!up) {
+    btn.append(svg(ICON.cam, 30), el('span', null, ed ? 'ถ่ายรูป' : 'ไม่มีรูป'));
+    btn.disabled = !ed;
+    btn.setAttribute('aria-label', 'แนบรูป ' + f.label);
   }
-  box.addEventListener('click', () => {
+  if (up) {
+    const ov = el('span', 'up'); ov.setAttribute('role', 'status');
+    const tr = el('span', 'track'); const i = el('i'); i.style.width = up.pct + '%'; tr.appendChild(i);
+    ov.append(tr, el('span', null, up.state === 'resize' ? 'กำลังย่อรูป…' : 'กำลังอัปโหลด ' + up.pct + '%'));
+    btn.appendChild(ov);
+  }
+  btn.addEventListener('click', () => {
     const cur = S.rec.data[f.field_id];
     if (cur && cur.full) return showFull(cur.full);
-    if (ed) pickPhoto(f);
+    if (ed && !up) pickPhoto(f);
   });
-  wrap.appendChild(box);
+  wrap.appendChild(btn);
 
-  if (v && ed) {
-    const acts = el('div', 'ph-act');
-    // ถ่ายเบลอแล้วเปลี่ยนใหม่เป็นงานที่เกิดบ่อย ไม่ควรต้องลบก่อนแล้วค่อยแนบใหม่
-    const swap = el('button', null, 'เปลี่ยน'); swap.type = 'button';
-    swap.title = 'เลือกรูปใหม่แทนรูปเดิม';
-    swap.addEventListener('click', () => pickPhoto(f));
-    const rm = el('button', null, '×'); rm.type = 'button';
-    rm.title = 'ลบรูปนี้'; rm.setAttribute('aria-label', 'ลบรูป ' + f.label);
-    rm.addEventListener('click', () => {
+  if (v && ed && !up) {
+    const rm = el('button', 'rm', 'ลบ'); rm.type = 'button';
+    rm.setAttribute('aria-label', 'ลบรูป ' + f.label);
+    rm.addEventListener('click', e => {
+      e.stopPropagation();
       if (!confirm('ลบรูป "' + f.label + '" ?')) return;
       delete S.rec.data[f.field_id]; S.dirty = true;
-      renderEditor(); loadThumbs();
+      queueSave(); renderEditor();
     });
-    acts.append(swap, rm);
-    wrap.appendChild(acts);
+    wrap.appendChild(rm);
   }
+  wrap.appendChild(el('div', 'cap', f.label));
   return wrap;
 }
 
-/* เลือกรูป → ย่อในเครื่อง 2 ขนาด → อัปโหลด
-   ย่อก่อนอัปช่วยให้ส่งเร็วขึ้นมาก และหน้ารายการโหลดแค่ภาพย่อ */
 function pickPhoto(f) {
   const inp = el('input'); inp.type = 'file'; inp.accept = 'image/*';
-  inp.addEventListener('change', async () => {
-    const file = inp.files[0]; if (!file) return;
-    const box = $('#ph_' + f.field_id);
-    const busy = el('div', 'busy', 'กำลังย่อรูป…');
-    busy.setAttribute('role', 'status');
-    box.parentElement.appendChild(busy);
-    try {
-      if (!S.rec.id) { busy.textContent = 'กำลังสร้างเอกสาร…'; await saveRecord(false, true); }
-      const full = await resize(file, CONFIG.FULL);
-      const thumb = await resize(file, CONFIG.THUMB);
-      busy.textContent = 'กำลังอัปโหลด…';
-      const r = await api('files.upload', {
-        recordId: S.rec.id, fieldId: f.field_id, mime: 'image/jpeg',
-        full: full.b64, thumb: thumb.b64
-      });
-      S.rec.data[f.field_id] = { full: r.full, thumb: r.thumb, name: file.name };
-      await saveRecord(false, true);
-      renderEditor(); loadThumbs();
-      toast('อัปโหลดรูปแล้ว');
-    } catch (e) {
-      busy.remove(); toast(e.message);
-    }
-  });
+  inp.addEventListener('change', () => { if (inp.files[0]) enqueueUpload(f, inp.files[0]); });
   inp.click();
+}
+
+/* คิวอัปโหลดทีละไฟล์ — ผู้ใช้ถ่ายรูปถัดไปได้ทันทีโดยไม่ต้องรอ
+   ทำทีละคำขอเพราะฝั่ง Apps Script ลบแถวทะเบียนไฟล์ตามเลขดัชนี ยิงพร้อมกันแล้วดัชนีจะเลื่อนชนกัน */
+let upChain = Promise.resolve();
+function enqueueUpload(f, file) {
+  S.up[f.field_id] = { pct: 0, state: 'resize' };
+  S.dirty = true;
+  renderEditor();
+  upChain = upChain.then(() => runUpload(f, file)).catch(() => {});
+  return upChain;
+}
+
+async function runUpload(f, file) {
+  const paint = () => { const s = $('#ph_' + f.field_id); if (s) renderEditor(); };
+  try {
+    if (!S.rec.id) await queueSave();                       // ต้องมีเอกสารก่อนจึงแนบไฟล์ได้
+    const full = await resize(file, CONFIG.FULL);
+    const thumb = await resize(file, CONFIG.THUMB);
+    S.up[f.field_id] = { pct: 0, state: 'upload' }; paint();
+    const r = await apiUpload(
+      { recordId: S.rec.id, fieldId: f.field_id, mime: 'image/jpeg', full: full.b64, thumb: thumb.b64 },
+      pct => { if (S.up[f.field_id]) { S.up[f.field_id].pct = pct; paint(); } }
+    );
+    S.thumbs[r.thumb] = 'data:image/jpeg;base64,' + thumb.b64;   // ใช้ภาพในเครื่องเลย ไม่ต้องดึงกลับ
+    S.rec.data[f.field_id] = { full: r.full, thumb: r.thumb, name: file.name };
+    delete S.up[f.field_id];
+    await queueSave();
+    renderEditor();
+  } catch (e) {
+    delete S.up[f.field_id];
+    renderEditor();
+    toast('รูป "' + f.label + '": ' + e.message);
+  }
 }
 
 function resize(file, maxW) {
@@ -455,35 +669,29 @@ function resize(file, maxW) {
       const c = el('canvas');
       c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      const dataUrl = c.toDataURL('image/jpeg', CONFIG.QUALITY);
-      resolve({ b64: dataUrl.split(',')[1], w: c.width });
+      resolve({ b64: c.toDataURL('image/jpeg', CONFIG.QUALITY).split(',')[1] });
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('ไฟล์นี้ไม่ใช่รูปภาพที่เปิดได้')); };
     img.src = url;
   });
 }
 
-/** ดึงภาพย่อทั้งหมดในเอกสารด้วยคำขอเดียว */
+/** ดึงภาพย่อที่ยังไม่มีในเครื่องด้วยคำขอเดียว */
 async function loadThumbs() {
+  if (!S.rec) return;
   const ids = S.fields.filter(f => f.type === 'image')
-    .map(f => S.rec.data[f.field_id]).filter(v => v && v.thumb).map(v => v.thumb);
+    .map(f => S.rec.data[f.field_id]).filter(v => v && v.thumb && !S.thumbs[v.thumb]).map(v => v.thumb);
   if (!ids.length) return;
   try {
     const r = await api('files.batch', { ids });
-    S.fields.filter(f => f.type === 'image').forEach(f => {
-      const v = S.rec.data[f.field_id]; if (!v || !r.files[v.thumb]) return;
-      const box = $('#ph_' + f.field_id); if (!box) return;
-      const img = el('img'); img.src = r.files[v.thumb]; img.alt = f.label; img.loading = 'lazy';
-      box.querySelectorAll('span').forEach(n => n.remove());
-      box.parentElement.querySelectorAll('.busy').forEach(n => n.remove());
-      box.prepend(img);
-    });
-  } catch (e) { toast(e.message); }
+    Object.keys(r.files).forEach(id => { if (r.files[id]) S.thumbs[id] = r.files[id]; });
+    if (S.rec) renderEditor();
+  } catch (e) { /* ไม่มีภาพย่อไม่ใช่เรื่องคอขาดบาดตาย ปล่อยให้ใช้งานต่อได้ */ }
 }
 
 async function showFull(id) {
   const lb = el('div'); lb.id = 'lightbox';
-  lb.innerHTML = '<div style="color:#fff">กำลังโหลดภาพ…</div>';
+  lb.appendChild(el('div', null, 'กำลังโหลดภาพ…'));
   const close = el('button', 'btn', 'ปิด');
   close.addEventListener('click', () => lb.remove());
   lb.appendChild(close);
@@ -496,58 +704,143 @@ async function showFull(id) {
   } catch (e) { lb.firstChild.textContent = e.message; }
 }
 
-/* ──────────────── ปุ่มดำเนินการ ──────────────── */
-function renderFooter(ed) {
-  const foot = $('#edFoot'); foot.innerHTML = '';
-  const rec = S.rec;
-  // Apps Script ตอบ 1–3 วินาที ถ้าไม่ล็อกปุ่มไว้ ผู้ใช้จะกดซ้ำและได้ error สถานะที่อ่านไม่รู้เรื่อง
-  const add = (label, cls, fn) => {
-    const b = el('button', 'btn ' + cls, label);
-    b.addEventListener('click', async () => {
-      const all = foot.querySelectorAll('button');
-      all.forEach(x => { x.disabled = true; });
-      const prev = b.textContent; b.textContent = 'กำลังทำงาน…';
-      try { await fn(); }
-      catch (e) { /* ข้อความแจ้งผู้ใช้ถูกจัดการใน fn แล้ว */ }
-      finally {
-        // footer อาจถูก render ใหม่ระหว่างทาง จึงต้องเช็กว่าปุ่มนี้ยังอยู่ในหน้าจริงไหม
-        if (document.contains(b)) { b.textContent = prev; all.forEach(x => { x.disabled = false; }); }
-      }
-    });
-    foot.appendChild(b);
-  };
+/* ──────────────── หน้าตรวจทาน ──────────────── */
+function renderReview(secs) {
+  const body = $('#edBody');
+  const visible = S.fields.filter(f => f.visible);
+  const total = visible.length || 1;
+  const done = filledIn(visible);
+  const missing = visible.filter(f => f.required && !S.rec.data[f.field_id]);
 
-  if (ed) add('บันทึกร่าง', '', () => saveRecord(false));
-  if (ed && S.perm.submit) add('บันทึกและส่งตรวจสอบ', 'btn-primary', () => saveRecord(true));
+  const p = el('div', 'panel');
+  const h = el('div', 'head');
+  const right = el('div'); right.style.cssText = 'font-size:15px;font-weight:600;color:var(--primary)';
+  right.textContent = done + ' / ' + total + ' ช่อง';
+  h.append(el('h3', null, 'ความครบของใบงาน'), right);
+  const bar = el('div', 'pbar'); bar.style.height = '8px';
+  const fill = el('i'); fill.style.width = Math.round(done / total * 100) + '%'; bar.appendChild(fill);
+  const hint = el('div', 'sub');
+  hint.textContent = missing.length
+    ? 'ยังไม่ได้กรอก: ' + missing.slice(0, 4).map(f => f.label).join(', ') + (missing.length > 4 ? ` และอีก ${missing.length - 4} ช่อง` : '') + ' — ส่งตรวจได้ แต่ผู้ตรวจอาจตีกลับ'
+    : 'กรอกครบทุกช่องที่ทำเครื่องหมายไว้แล้ว';
+  p.append(h, bar, hint);
+  body.appendChild(p);
 
-  if (rec.id && rec.status === S.statuses.submitted && S.perm.review) {
-    add('ตีกลับ', 'btn-danger', () => move(S.statuses.rejected));
-    add('ตรวจสอบผ่าน', 'btn-primary', () => move(S.statuses.reviewed));
-  }
-  if (rec.id && rec.status === S.statuses.reviewed && S.perm.approve) {
-    add('ตีกลับ', 'btn-danger', () => move(S.statuses.rejected));
-    add('อนุมัติ (ปิดงาน)', 'btn-primary', () => move(S.statuses.complete));
-  }
-  if (rec.id && rec.status === S.statuses.complete && S.user.role === 'admin') {
-    add('เปิดแก้ไขใหม่', '', () => { if (confirm('เปิดเอกสารที่ปิดงานแล้วกลับมาแก้ไข? การลงนามเดิมจะถูกล้าง')) move(S.statuses.draft); });
-  }
-  if (rec.id && S.perm.del) {
-    add('ลบเอกสาร', 'btn-danger', async () => {
-      if (!confirm('ลบเอกสาร ' + rec.id + ' และรูปทั้งหมด? กู้คืนไม่ได้')) return;
-      try { await api('records.delete', { id: rec.id }); S.dirty = false; closeEditor(); toast('ลบแล้ว'); }
-      catch (e) { toast(e.message); }
-    });
+  secs.forEach((g, i) => {
+    const n = filledIn(g.items), all = n === g.items.length;
+    const b = el('button', 'steplink'); b.type = 'button';
+    const mk = el('span', 'mk' + (all ? ' done' : ''));
+    if (all) mk.appendChild(svg(ICON.check, 16)); else mk.textContent = String(i + 1);
+    const tx = el('span', 'tx');
+    const detail = el('small', null, all ? 'ครบ ' + n + ' / ' + g.items.length : n + ' / ' + g.items.length + ' — ยังไม่ครบ');
+    if (!all) detail.style.color = 'var(--wait)';
+    tx.append(el('b', null, g.name), detail);
+    b.append(mk, tx, svg(ICON.right, 22));
+    b.addEventListener('click', () => goStep(i));
+    body.appendChild(b);
+  });
+
+  const sp = el('div', 'panel');
+  sp.appendChild(el('h3', null, 'ลายเซ็น — ระบบประทับให้อัตโนมัติ'));
+  const grid = el('div', 'signs');
+  const sg = S.rec.sign || {};
+  [['จัดทำ', sg.staff], ['ตรวจสอบ', sg.supervisor], ['รับทราบ', sg.manager]].forEach(([role, val]) => {
+    const c = el('div', 'sign' + (val ? ' on' : ''));
+    const parts = String(val || '').split(') ');
+    c.append(el('div', 'r', role),
+      el('div', 'nm', val ? parts[0] + (parts.length > 1 ? ')' : '') : '—'),
+      el('div', 'tm', val && parts.length > 1 ? parts.slice(1).join(') ') : 'ยังไม่ได้เซ็น'));
+    if (!val) $('.nm', c).style.color = 'var(--muted)';
+    grid.appendChild(c);
+  });
+  sp.appendChild(grid);
+  body.appendChild(sp);
+
+  if (S.rec.note) {
+    const np = el('div', 'panel');
+    np.append(el('h3', null, 'เหตุผลการตีกลับ'), el('div', 'sub', S.rec.note));
+    $('.sub', np).style.color = 'var(--back)';
+    body.appendChild(np);
   }
 }
 
-async function saveRecord(thenSubmit, silent) {
+/* ──────────────── ปุ่มดำเนินการ ──────────────── */
+function renderFooter(secs, reviewStep) {
+  const foot = $('#edFoot'); foot.innerHTML = '';
+  const ed = canEdit();
+
+  if (S.step < reviewStep) {
+    const row = el('div', 'row');
+    if (S.step > 0) row.appendChild(mkBtn('ย้อนกลับ', 'btn', () => goStep(S.step - 1)));
+    const next = mkBtn(S.step === reviewStep - 1 ? 'ตรวจทานก่อนส่ง' : 'ถัดไป · ' + secs[S.step + 1].name,
+      'btn btn-primary', () => goStep(S.step + 1));
+    next.appendChild(svg(ICON.right, 20));
+    next.style.flex = '1.6';
+    row.appendChild(next);
+    foot.appendChild(row);
+    if (ed) foot.appendChild(mkBtn('บันทึกร่าง', 'btn', () => queueSave().then(() => toast('บันทึกแล้ว ' + S.rec.id))));
+    return;
+  }
+
+  const row = el('div', 'row');
+  const rec = S.rec;
+  if (ed) {
+    row.appendChild(mkBtn('บันทึกร่าง', 'btn', () => queueSave().then(() => toast('บันทึกแล้ว ' + rec.id))));
+    if (S.perm.submit) row.appendChild(mkBtn('ส่งตรวจสอบ', 'btn btn-primary', async () => {
+      await queueSave(); await move(S.statuses.submitted);
+    }));
+  }
+  if (S.perm.review && rec.status === S.statuses.submitted) {
+    row.appendChild(mkBtn('ตีกลับ', 'btn btn-danger', () => move(S.statuses.rejected)));
+    row.appendChild(mkBtn('ตรวจผ่าน', 'btn btn-primary', () => move(S.statuses.reviewed)));
+  }
+  if (S.perm.approve && rec.status === S.statuses.reviewed) {
+    row.appendChild(mkBtn('ตีกลับ', 'btn btn-danger', () => move(S.statuses.rejected)));
+    row.appendChild(mkBtn('อนุมัติ', 'btn btn-primary', () => move(S.statuses.complete)));
+  }
+  if (row.children.length) foot.appendChild(row);
+
+  const row2 = el('div', 'row');
+  if (S.user.role === 'admin' && rec.id && rec.status !== S.statuses.draft)
+    row2.appendChild(mkBtn('ดึงกลับเป็นร่าง', 'btn', () => move(S.statuses.draft)));
+  if (S.perm.del && rec.id) row2.appendChild(mkBtn('ลบเอกสาร', 'btn btn-danger', async () => {
+    if (!confirm('ลบเอกสาร ' + rec.id + ' และรูปทั้งหมด?\n\nลบแล้วกู้คืนไม่ได้')) return;
+    try { await api('records.delete', { id: rec.id }); S.dirty = false; closeEditor(); toast('ลบแล้ว'); }
+    catch (e) { toast(e.message); }
+  }));
+  if (row2.children.length) foot.appendChild(row2);
+}
+
+function mkBtn(label, cls, fn) {
+  const b = el('button', cls, label);
+  b.addEventListener('click', async () => {
+    const all = $('#edFoot').querySelectorAll('button');
+    all.forEach(x => { x.disabled = true; });
+    const prev = b.textContent; b.textContent = 'กำลังทำงาน…';
+    try { await fn(); } catch (e) { /* ข้อความแจ้งผู้ใช้ถูกจัดการใน fn แล้ว */ }
+    finally { if (document.contains(b)) { b.textContent = prev; all.forEach(x => { x.disabled = false; }); } }
+  });
+  return b;
+}
+
+/* บันทึกทีละคำขอตามลำดับ — รูปที่อัปเสร็จระหว่างรอจะได้ไม่ถูกคำขอเก่าเขียนทับ */
+let saveChain = Promise.resolve();
+function queueSave() {
+  saveChain = saveChain.then(() => doSave());
+  return saveChain;
+}
+
+async function doSave() {
+  if (!S.rec) return;
+  S.dirty = false;                       // แก้ระหว่างรอคำตอบจะตั้ง dirty กลับเป็น true เอง
   try {
     const r = await api('records.save', { record: { id: S.rec.id, data: S.rec.data } });
-    S.rec = r.record; S.dirty = false;
-    if (!silent) { renderEditor(); loadThumbs(); toast('บันทึกแล้ว ' + S.rec.id); }
-    if (thenSubmit) await move(S.statuses.submitted);
-    return r.record;
-  } catch (e) { toast(e.message); throw e; }
+    if (!S.rec) return;
+    // รับเฉพาะข้อมูลกำกับ ไม่เอา data กลับมาทับ ไม่งั้นรูปที่เพิ่งอัปเสร็จระหว่างรอจะหาย
+    const k = r.record;
+    S.rec.id = k.id; S.rec.status = k.status; S.rec.updated_at = k.updated_at;
+    S.rec.created_by = k.created_by; S.rec.sign = k.sign; S.rec.note = k.note;
+  } catch (e) { S.dirty = true; toast(e.message); throw e; }
 }
 
 async function move(to) {
@@ -558,7 +851,9 @@ async function move(to) {
   }
   try {
     const r = await api('records.move', { id: S.rec.id, to, note });
-    S.rec = r.record; renderEditor(); loadThumbs();
+    Object.assign(S.rec, r.record);
+    S.step = sections().length;
+    renderEditor();
     toast('เปลี่ยนสถานะเป็น ' + to);
   } catch (e) { toast(e.message); }
 }
@@ -569,16 +864,19 @@ $('#btnSettings').addEventListener('click', openSettings);
 function openSettings() {
   S.rec = null; S.dirty = false;
   $('#edTitle').textContent = 'ตั้งค่าระบบ';
-  $('#edStatus').textContent = ''; $('#edStatus').dataset.s = '';
-  const body = $('#edBody'); body.innerHTML = ''; $('#edFoot').innerHTML = '';
+  $('#edHint').textContent = 'หัวข้อในแบบฟอร์มและผู้ใช้';
+  $('#edStatus').textContent = ''; $('#edSteps').innerHTML = ''; $('#edFoot').innerHTML = '';
+  const body = $('#edBody'); body.innerHTML = '';
   if (S.perm.fields) body.appendChild(fieldManager());
   if (S.perm.users) body.appendChild(userManager());
   body.appendChild(passwordBox());
-  showEditor();
+  S.returnFocus = document.activeElement;
+  $('#editor').classList.remove('hide'); $('#app').inert = true;
+  $('#edBody').scrollTop = 0; $('#edClose').focus();
 }
 
 function fieldManager() {
-  const sec = el('section', 'section');
+  const sec = el('div', 'section');
   sec.appendChild(el('h3', null, 'หัวข้อในแบบฟอร์ม — เพิ่ม / แก้ไข / ซ่อน / ลบ'));
   const sb = el('div', 'section-body');
   const list = el('div'); sb.appendChild(list);
@@ -586,45 +884,42 @@ function fieldManager() {
   const draw = () => {
     list.innerHTML = '';
     const t = el('table');
-    t.innerHTML = '<thead><tr><th>ลำดับ</th><th>ชื่อหัวข้อ</th><th>ชนิด</th><th>กลุ่ม</th><th>บังคับ</th><th>แสดง</th><th>ในตาราง</th><th></th></tr></thead>';
+    t.innerHTML = '<thead><tr><th>หัวข้อ</th><th>ชนิด</th><th>กลุ่ม</th><th></th></tr></thead>';
     const tb = el('tbody');
     S.fields.forEach((f, i) => {
       const tr = el('tr');
-      tr.innerHTML = `<td>${i + 1}</td><td>${esc(f.label)}</td><td>${esc(f.type)}</td><td>${esc(f.section)}</td>
-        <td>${f.required ? '✓' : ''}</td><td>${f.visible ? '✓' : '—'}</td><td>${f.in_list ? '✓' : ''}</td>`;
+      tr.innerHTML = `<td>${esc(f.label)}${f.required ? ' *' : ''}${f.visible ? '' : ' (ซ่อน)'}</td>
+        <td>${esc(f.type)}</td><td>${esc(f.section)}</td>`;
       const td = el('td');
-      const bUp = el('button', 'btn btn-sm', '↑'); bUp.disabled = i === 0;
-      bUp.addEventListener('click', () => reorder(i, i - 1));
-      const bDn = el('button', 'btn btn-sm', '↓'); bDn.disabled = i === S.fields.length - 1;
-      bDn.addEventListener('click', () => reorder(i, i + 1));
-      const bEd = el('button', 'btn btn-sm', 'แก้ไข');
-      bEd.addEventListener('click', () => fieldForm(f, draw));
       const locked = (S.protected || []).indexOf(f.field_id) >= 0;
-      const lockWhy = 'หัวข้อนี้ระบบใช้ค้นหาและกรองข้อมูล ลบหรือซ่อนไม่ได้';
-      const bHide = el('button', 'btn btn-sm', f.visible ? 'ซ่อน' : 'แสดง');
-      bHide.disabled = locked && f.visible;
-      if (bHide.disabled) bHide.title = lockWhy;
-      bHide.addEventListener('click', async () => {
-        try {
-          const r = await api('fields.save', { field: Object.assign({}, f, { visible: !f.visible }) });
-          S.fields = r.fields; draw();
-        } catch (e) { toast(e.message); }
+      const why = 'หัวข้อนี้ระบบใช้ค้นหาและกรองข้อมูล ลบหรือซ่อนไม่ได้';
+
+      const up = el('button', 'btn btn-sm', '↑'); up.disabled = i === 0;
+      up.addEventListener('click', () => reorder(i, i - 1));
+      const dn = el('button', 'btn btn-sm', '↓'); dn.disabled = i === S.fields.length - 1;
+      dn.addEventListener('click', () => reorder(i, i + 1));
+      const edit = el('button', 'btn btn-sm', 'แก้ไข');
+      edit.addEventListener('click', () => fieldForm(f, draw));
+      const hide = el('button', 'btn btn-sm', f.visible ? 'ซ่อน' : 'แสดง');
+      hide.disabled = locked && f.visible;
+      if (hide.disabled) hide.title = why;
+      hide.addEventListener('click', async () => {
+        try { const r = await api('fields.save', { field: Object.assign({}, f, { visible: !f.visible }) }); S.fields = r.fields; draw(); }
+        catch (e) { toast(e.message); }
       });
-      const bDel = el('button', 'btn btn-sm btn-danger', 'ลบ');
-      bDel.disabled = locked;
-      bDel.title = locked ? lockWhy : 'ลบหัวข้อนี้';
-      bDel.addEventListener('click', async () => {
+      const del = el('button', 'btn btn-sm btn-danger', 'ลบ');
+      del.disabled = locked; del.title = locked ? why : 'ลบหัวข้อนี้';
+      del.addEventListener('click', async () => {
         if (!confirm('ลบหัวข้อ "' + f.label + '"?\n\nข้อมูลที่เคยกรอกไว้จะยังอยู่ในชีต และกลับมาแสดงได้ถ้าสร้างหัวข้อรหัสเดิมใหม่')) return;
         try { const r = await api('fields.delete', { field_id: f.field_id }); S.fields = r.fields; draw(); }
         catch (e) { toast(e.message); }
       });
-      [bUp, bDn, bEd, bHide, bDel].forEach(b => td.appendChild(b));
+      [up, dn, edit, hide, del].forEach(b => td.appendChild(b));
       tr.appendChild(td); tb.appendChild(tr);
     });
     t.appendChild(tb);
     const wrap = el('div', 'tablewrap'); wrap.appendChild(t); list.appendChild(wrap);
     const add = el('button', 'btn btn-primary', '+ เพิ่มหัวข้อ');
-    add.style.marginTop = '12px';
     add.addEventListener('click', () => fieldForm({ type: 'text', section: 'ทั่วไป', visible: true }, draw));
     list.appendChild(add);
   };
@@ -632,34 +927,34 @@ function fieldManager() {
   const reorder = async (from, to) => {
     const ids = S.fields.map(f => f.field_id);
     ids.splice(to, 0, ids.splice(from, 1)[0]);
-    const r = await api('fields.reorder', { order: ids }); S.fields = r.fields; draw();
+    try { const r = await api('fields.reorder', { order: ids }); S.fields = r.fields; draw(); }
+    catch (e) { toast(e.message); }
   };
 
   draw(); sec.appendChild(sb); return sec;
 }
 
 function fieldForm(f, done) {
-  const types = [['text', 'ข้อความ'], ['number', 'ตัวเลข'], ['date', 'วันที่'], ['select', 'ตัวเลือก'], ['textarea', 'ข้อความยาว'], ['image', 'รูปภาพ/เอกสาร']];
   const label = prompt('ชื่อหัวข้อ', f.label || ''); if (!label) return;
-  const type = prompt('ชนิด: ' + types.map(t => t[0]).join(' / '), f.type || 'text'); if (!type) return;
-  const section = prompt('กลุ่ม (หัวข้อย่อยในฟอร์ม)', f.section || 'ทั่วไป') || 'ทั่วไป';
+  const type = prompt('ชนิด: text / number / date / select / textarea / image', f.type || 'text') || 'text';
+  const section = prompt('กลุ่ม (ใช้เป็นชื่อขั้นในฟอร์ม)', f.section || 'ทั่วไป') || 'ทั่วไป';
   const options = type === 'select' ? (prompt('ตัวเลือก คั่นด้วย |', (f.options || []).join('|')) || '').split('|').filter(Boolean) : [];
-  const required = confirm('บังคับกรอกก่อนส่งตรวจสอบหรือไม่? (ตกลง = บังคับ)');
-  const in_list = confirm('แสดงคอลัมน์นี้ในตารางหน้าแรกหรือไม่? (ตกลง = แสดง)');
+  const required = confirm('ทำเครื่องหมายว่าควรกรอกหรือไม่? (ตกลง = ใช่)');
+  const in_list = confirm('แสดงในการ์ดหน้าแรกหรือไม่? (ตกลง = แสดง)');
   api('fields.save', { field: Object.assign({}, f, { label, type, section, options, required, in_list, visible: f.visible !== false }) })
     .then(r => { S.fields = r.fields; done(); toast('บันทึกหัวข้อแล้ว'); })
     .catch(e => toast(e.message));
 }
 
 function userManager() {
-  const sec = el('section', 'section');
+  const sec = el('div', 'section');
   sec.appendChild(el('h3', null, 'ผู้ใช้และบทบาท'));
   const sb = el('div', 'section-body');
   const list = el('div'); sb.appendChild(list);
   const roles = ['admin', 'staff', 'supervisor', 'manager', 'viewer'];
 
   /** บทบาทที่พิมพ์ผิดจะสร้างบัญชีที่เข้าระบบได้แต่ไม่มีสิทธิ์อะไรเลย จึงต้องตรงกับรายการเท่านั้น */
-  const askRole = (current) => {
+  const askRole = current => {
     const v = prompt('บทบาท: ' + roles.join(' / '), current);
     if (v === null) return '';
     const r = String(v).trim().toLowerCase();
@@ -679,13 +974,11 @@ function userManager() {
       const bR = el('button', 'btn btn-sm', 'เปลี่ยนบทบาท');
       bR.addEventListener('click', async () => {
         const role = askRole(u.role); if (!role) return;
-        try { await api('users.save', { user: { username: u.username, role } }); draw(); }
-        catch (e) { toast(e.message); }
+        try { await api('users.save', { user: { username: u.username, role } }); draw(); } catch (e) { toast(e.message); }
       });
       const bA = el('button', 'btn btn-sm', u.active ? 'ปิดใช้งาน' : 'เปิดใช้งาน');
       bA.addEventListener('click', async () => {
-        try { await api('users.save', { user: { username: u.username, active: !u.active } }); draw(); }
-        catch (e) { toast(e.message); }
+        try { await api('users.save', { user: { username: u.username, active: !u.active } }); draw(); } catch (e) { toast(e.message); }
       });
       const bP = el('button', 'btn btn-sm', 'ตั้งรหัสใหม่');
       bP.addEventListener('click', async () => {
@@ -698,7 +991,7 @@ function userManager() {
     });
     t.appendChild(tb);
     list.innerHTML = ''; const wrap = el('div', 'tablewrap'); wrap.appendChild(t); list.appendChild(wrap);
-    const add = el('button', 'btn btn-primary', '+ เพิ่มผู้ใช้'); add.style.marginTop = '12px';
+    const add = el('button', 'btn btn-primary', '+ เพิ่มผู้ใช้');
     add.addEventListener('click', async () => {
       const username = prompt('ชื่อผู้ใช้ (ภาษาอังกฤษ)'); if (!username) return;
       const display_name = prompt('ชื่อที่แสดง', username) || username;
@@ -714,7 +1007,7 @@ function userManager() {
 }
 
 function passwordBox() {
-  const sec = el('section', 'section');
+  const sec = el('div', 'section');
   sec.appendChild(el('h3', null, 'รหัสผ่านของฉัน'));
   const sb = el('div', 'section-body');
   const b = el('button', 'btn', 'เปลี่ยนรหัสผ่าน');
@@ -727,13 +1020,11 @@ function passwordBox() {
 }
 
 /* ──────────────── utils ──────────────── */
-const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
-
 /** 2026-09-14 → 14 ก.ย. 2569 (ให้ตรงกับ dropdown ตัวกรองที่เป็น พ.ศ.) */
 function thaiDate(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s));
   if (!m) return String(s);
-  return Number(m[3]) + ' ' + THAI_MONTHS[Number(m[2]) - 1] + ' ' + (Number(m[1]) + 543);
+  return Number(m[3]) + ' ' + MONTHS[Number(m[2]) - 1] + ' ' + (Number(m[1]) + 543);
 }
 
 function esc(s) {
