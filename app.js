@@ -920,7 +920,8 @@ async function openPrint() {
       const cell = el('div', 'p-ph');
       const v = rec.data[f.field_id];
       if (v && v.full) { cell.appendChild(el('div', 'none', 'กำลังโหลด…')); need.push({ id: v.full, cell: cell }); }
-      else cell.appendChild(el('div', 'none', 'ไม่มีรูป'));
+      // ไม่มีรูป = เว้นช่องว่างไว้เฉยๆ ให้เขียนหรือแปะทีหลังได้ ไม่ต้องขึ้นคำว่า "ไม่มีรูป" บนเอกสารจริง
+      else cell.appendChild(el('div', 'none'));
       cell.appendChild(el('div', 'cap', f.label));
       grid.appendChild(cell);
     });
